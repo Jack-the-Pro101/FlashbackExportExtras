@@ -96,7 +96,7 @@ public class HdrVideoWriter implements VideoWriter {
             "-pix_fmt", "yuv420p10le",
             "-color_primaries", "bt2020",
             "-color_trc", "smpte2084",
-            "-colorspace", "bt2020c",
+            "-colorspace", "bt2020nc",
             "-color_range", "pc",
             "-x265-params", "hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"
                     + ":nal-hrd=cbr:vbv-maxrate=" + Math.max(1, bitrate / 1000)
