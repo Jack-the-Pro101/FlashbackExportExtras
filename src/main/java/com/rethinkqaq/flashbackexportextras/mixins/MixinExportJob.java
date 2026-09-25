@@ -161,19 +161,45 @@ public class MixinExportJob {
         }
         /*? if hdr {*/
         if (isHdrMode || isSLog3Mode) {
-            Path tempPath = java.nio.file.Path.of(tempFileName);
-            int w = settings.resolutionX();
-            int h = settings.resolutionY();
-            FlashbackExportExtras.LOGGER.info("HDR export temporary path: {}, final path: {}", tempPath, settings.output());
-            int bitrate = settings.bitrate() > 0
-                    ? settings.bitrate()
-                    : Math.min(288_000_000,
+            String encoder = HdrVideoWriter.resolveVideoEncoder(
+                    settings.codec() == null ? null : settings.codec().name(),
+                    settings.encoder());
+            if (encoder == null) {
+                // Codec cannot carry HDR 10-bit (image codecs, qtrle, qsv/vaapi);
+                // fall back to Flashback's normal SDR writer.
+                FlashbackExportExtras.LOGGER.warn(
+                        "HDR export: codec/encoder {} ({}) cannot carry HDR 10-bit color; " +
+                        "exporting standard SDR instead",
+                        settings.codec(), settings.encoder());
+                isHdrMode = false;
+                isSLog3Mode = false;
+            } else {
+                Path tempPath = java.nio.file.Path.of(tempFileName);
+                int w = settings.resolutionX();
+                int h = settings.resolutionY();
+                FlashbackExportExtras.LOGGER.info("HDR export temporary path: {}, final path: {}", tempPath, settings.output());
+                boolean prores = encoder.toLowerCase(java.util.Locale.ROOT).startsWith("prores");
+                int bitrate;
+                if (settings.bitrate() > 0) {
+                    bitrate = settings.bitrate();
+                } else if (prores) {
+                    // Apple's ProRes 4444 target rate is roughly 5.3 bits per
+                    // pixel per frame (e.g. ~330 Mbps at 1080p30).
+                    long proresBitrate = Math.min(1_200_000_000L,
+                            (long) (w * (double) h * settings.framerate() * 5.3));
+                    bitrate = (int) Math.max(1, proresBitrate);
+                } else {
+                    bitrate = Math.min(288_000_000,
                             5_000 + (int) Math.ceil(w * (double) h * settings.framerate()));
-            hdrWriterRef = new HdrVideoWriter(tempPath, w, h, settings.framerate(), bitrate,
-                    isSLog3Mode ? HdrVideoWriter.TRANSFER_S_LOG3 : HdrVideoWriter.TRANSFER_PQ,
-                    settings.recordAudio() ? (settings.stereoAudio() ? 2 : 1) : 0,
-                    settings.audioCodec() == null ? "AAC" : settings.audioCodec().name());
-            return hdrWriterRef;
+                }
+                hdrWriterRef = new HdrVideoWriter(tempPath, w, h, settings.framerate(), bitrate,
+                        isSLog3Mode ? HdrVideoWriter.TRANSFER_S_LOG3 : HdrVideoWriter.TRANSFER_PQ,
+                        settings.recordAudio() ? (settings.stereoAudio() ? 2 : 1) : 0,
+                        settings.audioCodec() == null ? "AAC" : settings.audioCodec().name(),
+                        settings.codec() == null ? null : settings.codec().name(),
+                        encoder);
+                return hdrWriterRef;
+            }
         }
         /*?}*/
         if (settings.container() == VideoContainer.PNG_SEQUENCE) {
