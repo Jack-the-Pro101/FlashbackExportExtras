@@ -72,18 +72,25 @@ public final class LegacyOpenGlExportBackend implements GpuExportBackend {
     @Override
     public void captureHdr(RenderTarget target, int width, int height,
                            float peakBrightness, long frameId) {
+        // Default to PQ (HDR10) for backwards compatibility
+        captureHdr(target, width, height, peakBrightness, frameId, 11);
+    }
+
+    @Override
+    public void captureHdr(RenderTarget target, int width, int height,
+                           float peakBrightness, long frameId, int transferFunction) {
         /*? if hdr {*/
         if (target == null || hdrReadbackFailed) return;
         try {
             if (hdrShader == null) hdrShader = new com.rethinkqaq.flashbackexportextras.exporting.HdrColorTransformShader();
             if (hdrCapture == null) hdrCapture = new com.rethinkqaq.flashbackexportextras.exporting.HdrFrameCapture();
-            int hdrTexture = hdrShader.render(colorTextureId(target), peakBrightness);
+            int hdrTexture = hdrShader.render(colorTextureId(target), peakBrightness, transferFunction);
             hdrCapture.issueReadback(hdrTexture, width, height, frameId);
         } catch (RuntimeException e) {
             hdrReadbackFailed = true;
             com.rethinkqaq.flashbackexportextras.exporting.HdrVideoCaptureState.fail(e);
             com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.error(
-                    "OpenGL HDR10 capture failed for frame " + frameId, e);
+                    "OpenGL HDR capture failed for frame " + frameId, e);
         }
         /*?}*/
     }

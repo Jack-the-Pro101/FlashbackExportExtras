@@ -202,15 +202,33 @@ public class MixinStartExportWindow {
             boolean sceneLinearHdrAvailable = HdrExportState.isAvailable()
                     && GpuExportBackendFactory.get().supportsSceneLinearHdr();
             if (sceneLinearHdrAvailable) {
-                boolean sceneLinearHdr = FlashbackExportExtrasConfig.INSTANCE.exrSceneLinearHdr;
-                if (ImGui.checkbox(I18n.get("flashbackexportextras.exr_scene_linear_hdr"), sceneLinearHdr)) {
-                    FlashbackExportExtrasConfig.INSTANCE.exrSceneLinearHdr = !sceneLinearHdr;
-                    FlashbackExportExtrasConfig.save();
+                FlashbackExportExtrasConfig.ExrColorEncoding encoding =
+                        FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding();
+                String encodingLabel = switch (encoding) {
+                    case SDR -> I18n.get("flashbackexportextras.exr_color_sdr");
+                    case SCENE_LINEAR -> I18n.get("flashbackexportextras.exr_color_scene_linear");
+                    case S_LOG3 -> I18n.get("flashbackexportextras.exr_color_slog3");
+                };
+                if (ImGui.beginCombo(I18n.get("flashbackexportextras.exr_color"), encodingLabel)) {
+                    for (FlashbackExportExtrasConfig.ExrColorEncoding candidate
+                            : FlashbackExportExtrasConfig.ExrColorEncoding.values()) {
+                        String candidateLabel = switch (candidate) {
+                            case SDR -> I18n.get("flashbackexportextras.exr_color_sdr");
+                            case SCENE_LINEAR -> I18n.get("flashbackexportextras.exr_color_scene_linear");
+                            case S_LOG3 -> I18n.get("flashbackexportextras.exr_color_slog3");
+                        };
+                        if (ImGui.selectable(candidateLabel, candidate == encoding)) {
+                            FlashbackExportExtrasConfig.INSTANCE.exrColorEncoding = candidate;
+                            FlashbackExportExtrasConfig.save();
+                        }
+                    }
+                    ImGui.endCombo();
                 }
                 if (ImGui.isItemHovered()) {
-                    ImGui.setTooltip(I18n.get("flashbackexportextras.exr_scene_linear_hdr_tooltip"));
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.exr_color_tooltip"));
                 }
-            } else if (FlashbackExportExtrasConfig.INSTANCE.exrSceneLinearHdr) {
+            } else if (FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
+                    != FlashbackExportExtrasConfig.ExrColorEncoding.SDR) {
                 ImGui.textWrapped(I18n.get("flashbackexportextras.exr_scene_linear_hdr_unavailable"));
             }
             /*?}*/
@@ -221,19 +239,56 @@ public class MixinStartExportWindow {
         }
 
         /*? if hdr {*/
-        // === HDR Export option (only shown when HDR Mod is available) ===
+        // === HDR Export options (only shown when HDR Mod is available) ===
         if (HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr()) {
             ImGui.spacing();
-            boolean hdr = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10;
-            if (ImGui.checkbox(I18n.get("flashbackexportextras.hdr_export"), hdr)) {
-                FlashbackExportExtrasConfig.INSTANCE.setExportMode(hdr ? ExportMode.VIDEO : ExportMode.HDR10);
+            
+            // HDR10 Export option
+            boolean hdr10 = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10;
+            if (ImGui.checkbox(I18n.get("flashbackexportextras.hdr_export"), hdr10)) {
+                FlashbackExportExtrasConfig.INSTANCE.setExportMode(hdr10 ? ExportMode.VIDEO : ExportMode.HDR10);
                 FlashbackExportExtrasConfig.save();
             }
             if (ImGui.isItemHovered()) {
                 ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_export_tooltip"));
             }
 
+            // S-Log3 Export option
+            boolean slog3 = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3;
+            if (ImGui.checkbox(I18n.get("flashbackexportextras.slog3_export"), slog3)) {
+                FlashbackExportExtrasConfig.INSTANCE.setExportMode(slog3 ? ExportMode.VIDEO : ExportMode.S_LOG3);
+                FlashbackExportExtrasConfig.save();
+            }
+            if (ImGui.isItemHovered()) {
+                ImGui.setTooltip(I18n.get("flashbackexportextras.slog3_export_tooltip"));
+            }
+
+            // Settings for HDR10 mode
             if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10) {
+                // Peak brightness slider
+                int[] peak = {FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness};
+                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_peak_brightness"), peak, 500, 4000)) {
+                    FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness = peak[0];
+                    HdrExportState.setPeakBrightness((float) peak[0]);
+                    FlashbackExportExtrasConfig.save();
+                }
+                if (ImGui.isItemHovered()) {
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_peak_brightness_tooltip"));
+                }
+
+                // Paper white brightness slider
+                int[] paperWhite = {FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits};
+                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_paper_white"), paperWhite, 80, 500)) {
+                    FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits = paperWhite[0];
+                    FlashbackExportExtrasConfig.save();
+                }
+                if (ImGui.isItemHovered()) {
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_paper_white_tooltip"));
+                }
+            }
+
+            // Settings for S-Log3 mode
+            if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3) {
                 // Peak brightness slider
                 int[] peak = {FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness};
                 if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_peak_brightness"), peak, 500, 4000)) {

@@ -228,6 +228,12 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
     @Override
     public void captureHdr(RenderTarget target, int width, int height,
                            float peakBrightness, long frameId) {
+        // Default to PQ (HDR10) for backwards compatibility
+        captureHdr(target, width, height, peakBrightness, frameId, 11);
+    }
+
+    public void captureHdr(RenderTarget target, int width, int height,
+                           float peakBrightness, long frameId, int transferFunction) {
         //? if >=26.2 {
         if (target == null || target.getColorTexture() == null || target.getColorTextureView() == null
                 || hdrReadbackFailed) return;
@@ -242,17 +248,20 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
                 hdrStagingWaitCount++;
                 hdrLongestWaitNanos = Math.max(hdrLongestWaitNanos, System.nanoTime() - waitStarted);
                 if (!complete) {
-                    throw new IllegalStateException("Timed out waiting for HDR10 frame "
+                    throw new IllegalStateException("Timed out waiting for HDR frame "
                             + hdrReadbackFrameIds[index]);
                 }
             }
+            // std140 layout: float PeakBrightness (4 bytes) + int TransferFunction (4 bytes) = 8 bytes, padded to 16
             ByteBuffer parameters = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
-            parameters.putFloat(peakBrightness).putFloat(0.0f).putFloat(0.0f).putFloat(0.0f).flip();
+            parameters.putFloat(peakBrightness);
+            parameters.putInt(transferFunction);
+            parameters.putFloat(0.0f).putFloat(0.0f).flip(); // padding to 16 bytes
 
             CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
             encoder.writeToBuffer(hdrUniformBuffer.slice(), parameters);
             try (RenderPass pass = encoder.createRenderPass(
-                    () -> "Flashback Export Extras HDR10 colour transform", hdrCopyView, java.util.Optional.empty())) {
+                    () -> "Flashback Export Extras HDR colour transform", hdrCopyView, java.util.Optional.empty())) {
                 pass.setPipeline(hdrCopyPipeline);
                 pass.bindTexture("InSampler", target.getColorTextureView(),
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
@@ -275,7 +284,8 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
         if (target == null || target.getColorTexture() == null || target.getColorTextureView() == null) return;
         try {
             if (hdrModBridge == null) hdrModBridge = new HdrMod26_1ExportBridge();
-            hdrModBridge.captureHdr(target, width, height, peakBrightness, frameId);
+            // Pass transfer function as int (11 = PQ, 12 = S-Log3); bridge handles enum conversion
+            hdrModBridge.captureHdr(target, width, height, peakBrightness, frameId, transferFunction);
         } catch (RuntimeException e) {
             HdrVideoCaptureState.fail(e);
             com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.error(

@@ -45,7 +45,16 @@ public interface GpuExportBackend extends AutoCloseable {
 
     /** Queues an RGBA16 BT.2020/PQ capture for the matching export frame. */
     default void captureHdr(RenderTarget target, int width, int height,
-                            float peakBrightness, long frameId) {}
+                            float peakBrightness, long frameId) {
+        captureHdr(target, width, height, peakBrightness, frameId, 11);
+    }
+
+    /** Queues an HDR capture with the specified transfer function.
+     * @param transferFunction 11 = PQ (HDR10/ST.2084), 12 = S-Log3 */
+    default void captureHdr(RenderTarget target, int width, int height,
+                            float peakBrightness, long frameId, int transferFunction) {
+        captureHdr(target, width, height, peakBrightness, frameId);
+    }
 
     /** Queues an RGBA16F scene-linear Rec.709 capture for the matching export frame. */
     default void captureSceneLinearHdr(RenderTarget target, int width, int height, long frameId) {}

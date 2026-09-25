@@ -65,14 +65,14 @@ public class ExrVideoWriter implements VideoWriter {
     private long encodedFrameCount;
 
     public ExrVideoWriter(Path outputDir, int width, int height, boolean sceneLinearHdr,
-                          ExrCompression compression) throws IOException {
+                          boolean sLog3Encoding, ExrCompression compression) throws IOException {
         this.sceneLinearHdr = sceneLinearHdr;
         this.exrWriters = new MultiLayerExrWriter[WRITER_COUNT];
         try {
             for (int i = 0; i < WRITER_COUNT; i++) {
                 exrWriters[i] = new MultiLayerExrWriter(outputDir, width, height,
                         FlashbackExportExtrasConfig.INSTANCE.depthLinearizeWorldSpace, sceneLinearHdr,
-                        compression);
+                        sLog3Encoding, compression);
             }
         } catch (IOException | RuntimeException e) {
             for (MultiLayerExrWriter writer : exrWriters) {
@@ -88,8 +88,8 @@ public class ExrVideoWriter implements VideoWriter {
             writerThread.start();
             writerThreads[i] = writerThread;
         }
-        FlashbackExportExtras.LOGGER.info("EXR writers started: output={}, workers={}, queueCapacity={}, sceneLinearHdr={}, compression={}",
-                outputDir, WRITER_COUNT, QUEUE_CAPACITY, sceneLinearHdr, compression);
+        FlashbackExportExtras.LOGGER.info("EXR writers started: output={}, workers={}, queueCapacity={}, sceneLinearHdr={}, slog3={}, compression={}",
+                outputDir, WRITER_COUNT, QUEUE_CAPACITY, sceneLinearHdr, sLog3Encoding, compression);
     }
 
     /*? if >=26.1 {*/

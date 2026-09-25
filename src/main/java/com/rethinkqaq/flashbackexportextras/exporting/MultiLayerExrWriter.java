@@ -23,6 +23,7 @@ package com.rethinkqaq.flashbackexportextras.exporting;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtras;
+import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig.ExrCompression;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryUtil;
@@ -68,6 +69,7 @@ public class MultiLayerExrWriter implements AutoCloseable {
     private final int height;
     private final boolean linearizeDepth;
     private final boolean sceneLinearHdr;
+    private final boolean sLog3Encoding;
     private final int compressionType;
     private int frameCount;
     private boolean closed = false;
@@ -87,12 +89,13 @@ public class MultiLayerExrWriter implements AutoCloseable {
     private final List<ByteBuffer> customAttributeBuffers;
 
     public MultiLayerExrWriter(Path outputDir, int width, int height, boolean linearizeDepth,
-                               boolean sceneLinearHdr, ExrCompression compression) throws IOException {
+                               boolean sceneLinearHdr, boolean sLog3Encoding, ExrCompression compression) throws IOException {
         this.outputDir = outputDir;
         this.width = width;
         this.height = height;
         this.linearizeDepth = linearizeDepth;
         this.sceneLinearHdr = sceneLinearHdr;
+        this.sLog3Encoding = sLog3Encoding;
         this.compressionType = switch (compression == null ? ExrCompression.ZIP : compression) {
             case NONE -> TinyEXR.TINYEXR_COMPRESSIONTYPE_NONE;
             case ZIPS -> TinyEXR.TINYEXR_COMPRESSIONTYPE_ZIPS;
@@ -147,10 +150,18 @@ public class MultiLayerExrWriter implements AutoCloseable {
             ByteBuffer attributeType = MemoryUtil.memUTF8("chromaticities");
             ByteBuffer chromaticities = MemoryUtil.memAlloc(8 * Float.BYTES)
                     .order(ByteOrder.LITTLE_ENDIAN);
-            // Rec.709/sRGB primaries and D65 white, in OpenEXR chromaticities order.
-            chromaticities.putFloat(0.6400f).putFloat(0.3300f);
-            chromaticities.putFloat(0.3000f).putFloat(0.6000f);
-            chromaticities.putFloat(0.1500f).putFloat(0.0600f);
+            if (sLog3Encoding) {
+                // BT.2020/UHD primaries and D65 white, in OpenEXR
+                // chromaticities order (red, green, blue, white xy pairs).
+                chromaticities.putFloat(0.7080f).putFloat(0.2920f);
+                chromaticities.putFloat(0.1700f).putFloat(0.7970f);
+                chromaticities.putFloat(0.1310f).putFloat(0.0460f);
+            } else {
+                // Rec.709/sRGB primaries and D65 white.
+                chromaticities.putFloat(0.6400f).putFloat(0.3300f);
+                chromaticities.putFloat(0.3000f).putFloat(0.6000f);
+                chromaticities.putFloat(0.1500f).putFloat(0.0600f);
+            }
             chromaticities.putFloat(0.3127f).putFloat(0.3290f).flip();
             customAttributes.get(0)
                     .name(attributeName)
@@ -176,7 +187,7 @@ public class MultiLayerExrWriter implements AutoCloseable {
         frameCount++;
     }
 
-    /** Writes scene-linear Rec.709 RGBA16F color with the matching depth frame. */
+    /** Writes scene-linear Rec.709 (or S-Log3/BT.2020) RGBA16F color with the matching depth frame. */
     public void writeHdrFrame(ByteBuffer rgba16f, DepthCaptureState.DepthFrame depthFrame,
                               int frameNumber) throws IOException {
         fillSceneLinearHdrColor(rgba16f);
@@ -221,13 +232,54 @@ public class MultiLayerExrWriter implements AutoCloseable {
             throw new IllegalArgumentException("RGBA16F frame is too small: "
                     + data.remaining() + " < " + requiredBytes);
         }
-        for (int i = 0; i < pixelCount; i++) {
-            int offset = i * 8;
-            rBuf.put(i, halfToFloat(data.getShort(offset)));
-            gBuf.put(i, halfToFloat(data.getShort(offset + 2)));
-            bBuf.put(i, halfToFloat(data.getShort(offset + 4)));
-            aBuf.put(i, halfToFloat(data.getShort(offset + 6)));
+        if (sLog3Encoding) {
+            // Input is scene-linear Rec.709; convert to BT.2020 and apply the
+            // same S-Log3 encoding as the S-Log3 video pipeline. The result is
+            // S-Log3 code values in [0,1] with BT.2020 primaries (declared via
+            // the chromaticities header attribute).
+            for (int i = 0; i < pixelCount; i++) {
+                int offset = i * 8;
+                float lr = halfToFloat(data.getShort(offset));
+                float lg = halfToFloat(data.getShort(offset + 2));
+                float lb = halfToFloat(data.getShort(offset + 4));
+                float a = halfToFloat(data.getShort(offset + 6));
+                // Matrix multiply needs the original linear values, so compute
+                // all three outputs from lr/lg/lb before overwriting them.
+                rBuf.put(i, sLog3Encode(BT709_TO_BT2020_00 * lr + BT709_TO_BT2020_01 * lg + BT709_TO_BT2020_02 * lb));
+                gBuf.put(i, sLog3Encode(BT709_TO_BT2020_10 * lr + BT709_TO_BT2020_11 * lg + BT709_TO_BT2020_12 * lb));
+                bBuf.put(i, sLog3Encode(BT709_TO_BT2020_20 * lr + BT709_TO_BT2020_21 * lg + BT709_TO_BT2020_22 * lb));
+                aBuf.put(i, a);
+            }
+        } else {
+            for (int i = 0; i < pixelCount; i++) {
+                int offset = i * 8;
+                rBuf.put(i, halfToFloat(data.getShort(offset)));
+                gBuf.put(i, halfToFloat(data.getShort(offset + 2)));
+                bBuf.put(i, halfToFloat(data.getShort(offset + 4)));
+                aBuf.put(i, halfToFloat(data.getShort(offset + 6)));
+            }
         }
+    }
+
+    // === S-Log3 encoding (Sony S-Log3 specification, matches the HDR shaders) ===
+    // BT.709 → BT.2020 gamut conversion matrix (row-major, same as GLSL version).
+    private static final float BT709_TO_BT2020_00 = 0.6274039149f;
+    private static final float BT709_TO_BT2020_01 = 0.0690972880f;
+    private static final float BT709_TO_BT2020_02 = 0.0163914394f;
+    private static final float BT709_TO_BT2020_10 = 0.3292830288f;
+    private static final float BT709_TO_BT2020_11 = 0.9195404053f;
+    private static final float BT709_TO_BT2020_12 = 0.0880133063f;
+    private static final float BT709_TO_BT2020_20 = 0.0433130561f;
+    private static final float BT709_TO_BT2020_21 = 0.0113922066f;
+    private static final float BT709_TO_BT2020_22 = 0.8955952542f;
+    /** S-Log3 is scene-referred: SDR white (1.0) = Sony's 90% scene white. */
+    private static final float S_LOG3_SDR_WHITE_SCALE = 0.9f;
+
+    /** S-Log3: V = (420 + log10((L + 0.01) / 0.19) * 261.5) / 1023, L = linear * 0.9. */
+    private float sLog3Encode(float linear) {
+        float l = Math.max(linear, 0.0f) * S_LOG3_SDR_WHITE_SCALE;
+        float v = (420.0f + (float) Math.log10((l + 0.01) / 0.19) * 261.5f) / 1023.0f;
+        return Math.min(Math.max(v, 0.0f), 1.0f);
     }
 
     private static float halfToFloat(short half) {

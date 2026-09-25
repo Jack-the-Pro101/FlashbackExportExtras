@@ -103,7 +103,7 @@ public class HdrColorTransformShader implements AutoCloseable {
         GL30.glBindVertexArray(0); org.lwjgl.system.MemoryUtil.memFree(data);
     }
 
-    public int render(int srcTextureId, float peakBrightness) {
+    public int render(int srcTextureId, float peakBrightness, int transferFunction) {
         RenderSystem.assertOnRenderThread();
         try (LegacyOpenGlRenderState state = LegacyOpenGlRenderState.capture()) {
             state.bindTextureForInspection(srcTextureId);
@@ -115,7 +115,7 @@ public class HdrColorTransformShader implements AutoCloseable {
             GL20.glUniform1i(GL20.glGetUniformLocation(program, "InSampler"), 0);
             GL20.glUniform1f(GL20.glGetUniformLocation(program, "UiBrightness"), peakBrightness);
             GL20.glUniform1i(GL20.glGetUniformLocation(program, "Primaries"), 6);
-            GL20.glUniform1i(GL20.glGetUniformLocation(program, "TransferFunction"), 11);
+            GL20.glUniform1i(GL20.glGetUniformLocation(program, "TransferFunction"), transferFunction);
             GL11.glDrawArrays(GL11.GL_TRIANGLE_FAN, 0, 4);
         }
         return texture;

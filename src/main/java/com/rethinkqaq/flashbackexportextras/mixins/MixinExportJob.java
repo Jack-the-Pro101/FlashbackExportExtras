@@ -75,6 +75,9 @@ public class MixinExportJob {
     private boolean isExrSceneLinearHdr;
 
     @Unique
+    private boolean isExrSLog3Encoding;
+
+    @Unique
     private boolean isHdrMode;
 
     @Unique
@@ -130,9 +133,10 @@ public class MixinExportJob {
                 "ExportJob creating writer: output={}, container={}, resolution={}x{}, temp={}",
                 settings.output(), settings.container(), settings.resolutionX(), settings.resolutionY(), tempFileName);
         flashbackexportextras$configureExportModes();
-        if (isExrMode && FlashbackExportExtrasConfig.INSTANCE.exrSceneLinearHdr && !isExrSceneLinearHdr) {
+        if (isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
+                != FlashbackExportExtrasConfig.ExrColorEncoding.SDR && !isExrSceneLinearHdr) {
             FlashbackExportExtras.LOGGER.warn(
-                    "Scene-linear HDR EXR is unavailable in this runtime; exporting standard SDR color");
+                    "HDR EXR color is unavailable in this runtime; exporting standard SDR color");
         }
         if (isExrMode) {
             String configuredName = FlashbackExportExtrasConfig.INSTANCE.exrOutputName == null
@@ -152,11 +156,11 @@ public class MixinExportJob {
             FlashbackExportExtras.LOGGER.info("OpenEXR frame output directory: {}", outputDir);
             int w = settings.resolutionX();
             int h = settings.resolutionY();
-            return new ExrVideoWriter(outputDir, w, h, isExrSceneLinearHdr,
+            return new ExrVideoWriter(outputDir, w, h, isExrSceneLinearHdr, isExrSLog3Encoding,
                     FlashbackExportExtrasConfig.INSTANCE.getExrCompression());
         }
         /*? if hdr {*/
-        if (isHdrMode) {
+        if (isHdrMode || isSLog3Mode) {
             Path tempPath = java.nio.file.Path.of(tempFileName);
             int w = settings.resolutionX();
             int h = settings.resolutionY();
@@ -165,7 +169,10 @@ public class MixinExportJob {
                     ? settings.bitrate()
                     : Math.min(288_000_000,
                             5_000 + (int) Math.ceil(w * (double) h * settings.framerate()));
-            hdrWriterRef = new HdrVideoWriter(tempPath, w, h, settings.framerate(), bitrate);
+            hdrWriterRef = new HdrVideoWriter(tempPath, w, h, settings.framerate(), bitrate,
+                    isSLog3Mode ? HdrVideoWriter.TRANSFER_S_LOG3 : HdrVideoWriter.TRANSFER_PQ,
+                    settings.recordAudio() ? (settings.stereoAudio() ? 2 : 1) : 0,
+                    settings.audioCodec() == null ? "AAC" : settings.audioCodec().name());
             return hdrWriterRef;
         }
         /*?}*/
@@ -177,15 +184,24 @@ public class MixinExportJob {
     }
 
     @Unique
+    private boolean isSLog3Mode;
+
+    @Unique
     private void flashbackexportextras$configureExportModes() {
         /*? if hdr {*/
         isHdrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10
                 && HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr();
+        isSLog3Mode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3
+                && HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr();
         /*?} else {*/
         /*isHdrMode = false;
+        isSLog3Mode = false;
         *//*?}*/
         isExrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.EXR;
-        isExrSceneLinearHdr = isExrMode && FlashbackExportExtrasConfig.INSTANCE.exrSceneLinearHdr
+        isExrSLog3Encoding = isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
+                == FlashbackExportExtrasConfig.ExrColorEncoding.S_LOG3;
+        isExrSceneLinearHdr = isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
+                != FlashbackExportExtrasConfig.ExrColorEncoding.SDR
                 && HdrExportState.isAvailable()
                 && GpuExportBackendFactory.get().supportsSceneLinearHdr();
     }
@@ -224,14 +240,15 @@ public class MixinExportJob {
         }
 
         /*? if hdr {*/
-        if (isHdrMode) {
+        if (isHdrMode || isSLog3Mode) {
             int w = self.getWidth();
             int h = self.getHeight();
             HdrExportState.width = w;
             HdrExportState.height = h;
             HdrExportState.setPeakBrightness((float) FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness);
             HdrExportState.activate();
-            FlashbackExportExtras.LOGGER.info("HDR export: {}x{} peak={}nits", w, h, HdrExportState.getPeakBrightness());
+            String modeName = isSLog3Mode ? "S-Log3" : "HDR10";
+            FlashbackExportExtras.LOGGER.info("{} export: {}x{} peak={}nits", modeName, w, h, HdrExportState.getPeakBrightness());
         }
         /*?}*/
 
@@ -292,16 +309,17 @@ public class MixinExportJob {
     @Unique
     private void flashbackexportextras$captureHdrBeforeDownload(RenderTarget target) {
         /*? if hdr {*/
-        if (!isHdrMode) return;
+        if (!isHdrMode && !isSLog3Mode) return;
         if (target == null) return;
 
         float peak = HdrExportState.getPeakBrightness();
         long frameId = flashbackexportextras_hdrCaptureFrameCount++;
+        int transferFunction = isSLog3Mode ? 12 : 11; // 12 = S-Log3, 11 = PQ (HDR10)
         GpuExportBackendFactory.get().captureHdr(
-                target, target.width, target.height, peak, frameId);
+                target, target.width, target.height, peak, frameId, transferFunction);
         flashbackexportextras$drainHdrFrames();
 
-        // Step 1: Color transform — scRGB-nl → BT.2020 + PQ
+        // Step 1: Color transform — scRGB-nl → BT.2020 + PQ/S-Log3
 
         /*?}*/
     }
@@ -342,11 +360,12 @@ public class MixinExportJob {
 
     @Unique
     private void flashbackexportextrasFlushGpuReadback() {
-        if (!isExrMode && !isHdrMode) return;
-        FlashbackExportExtras.LOGGER.info("Export GPU flush started: exr={}, hdr={}", isExrMode, isHdrMode);
+        if (!isExrMode && !isHdrMode && !isSLog3Mode) return;
+        FlashbackExportExtras.LOGGER.info("Export GPU flush started: exr={}, hdr={}, slog3={}",
+                isExrMode, isHdrMode, isSLog3Mode);
         GpuExportBackendFactory.get().flush();
         /*? if hdr {*/
-        if (isHdrMode) {
+        if (isHdrMode || isSLog3Mode) {
             flashbackexportextras$drainHdrFrames();
             long written = hdrWriterRef == null ? 0L : hdrWriterRef.getFrameCount();
             HdrVideoCaptureState.verifyComplete(flashbackexportextras_hdrCaptureFrameCount, written);
@@ -373,9 +392,11 @@ public class MixinExportJob {
                     target = "Lcom/moulberry/flashback/exporting/VideoWriter;encode(Lcom/moulberry/flashback/exporting/ImageFrame;)V"),
             remap = false)
     private void onVideoEncode(VideoWriter videoWriter, ImageFrame frame) {
-        if (isHdrMode) {
+        if (isHdrMode || isSLog3Mode) {
             // HDR frames arrive through the asynchronous GPU readback stream;
-            // release Flashback's normal SDR frame immediately.
+            // release Flashback's normal SDR frame after keeping its audio.
+            // (hdr is always enabled on >=26.1, so hdrWriterRef exists here.)
+            if (hdrWriterRef != null) hdrWriterRef.addAudioFrame(frame.audioBuffer);
             frame.close();
         } else {
             videoWriter.encode(frame);
@@ -389,8 +410,11 @@ public class MixinExportJob {
                     target = "Lcom/moulberry/flashback/exporting/VideoWriter;encode(Lcom/mojang/blaze3d/platform/NativeImage;Ljava/nio/FloatBuffer;)V"),
             remap = false)
     private void onVideoEncode(VideoWriter videoWriter, NativeImage image, FloatBuffer audioBuffer) {
-        if (isHdrMode) {
-            // Normal pipeline's NativeImage is unused in HDR mode.
+        if (isHdrMode || isSLog3Mode) {
+            // Normal pipeline's NativeImage is unused in HDR mode; keep audio.
+            /*? if hdr {*/
+            if (hdrWriterRef != null) hdrWriterRef.addAudioFrame(audioBuffer);
+            /*?}*/
             image.close();
         } else {
             videoWriter.encode(image, audioBuffer);
@@ -462,7 +486,9 @@ public class MixinExportJob {
         cameraExporter = null;
         isExrMode = false;
         isExrSceneLinearHdr = false;
+        isExrSLog3Encoding = false;
         isHdrMode = false;
+        isSLog3Mode = false;
         flashbackexportextras_nextDepthColorFrameId = 0L;
         /*? if hdr {*/
         hdrWriterRef = null;

@@ -49,8 +49,8 @@ public class FlashbackExportExtrasConfig {
     /** True = linearize depth from NDC [0,1] to world-space distance. */
     public boolean depthLinearizeWorldSpace = true;
 
-    /** True = preserve scene-linear Rec.709 HDR color in OpenEXR output. */
-    public boolean exrSceneLinearHdr = false;
+    /** EXR Combined-layer color encoding selected by the user. */
+    public ExrColorEncoding exrColorEncoding = ExrColorEncoding.SDR;
 
     /** Lossless EXR compression preset selected by the user. */
     public ExrCompression exrCompression = ExrCompression.ZIP;
@@ -79,7 +79,18 @@ public class FlashbackExportExtrasConfig {
     public enum ExportMode {
         VIDEO,
         EXR,
-        HDR10
+        HDR10,
+        S_LOG3
+    }
+
+    /** Color encoding of the EXR Combined layer. */
+    public enum ExrColorEncoding {
+        /** Standard 8-bit SDR Rec.709/sRGB color. */
+        SDR,
+        /** Scene-linear Rec.709 HDR color (values above 1.0 preserved). */
+        SCENE_LINEAR,
+        /** S-Log3 transfer with BT.2020 primaries (matches S-Log3 video export). */
+        S_LOG3
     }
 
     public enum ExrCompression {
@@ -90,6 +101,10 @@ public class FlashbackExportExtrasConfig {
 
     public ExrCompression getExrCompression() {
         return exrCompression == null ? ExrCompression.ZIP : exrCompression;
+    }
+
+    public ExrColorEncoding getExrColorEncoding() {
+        return exrColorEncoding == null ? ExrColorEncoding.SDR : exrColorEncoding;
     }
 
     public CameraPathExporter.Format getCameraExportFormat() {
@@ -125,6 +140,12 @@ public class FlashbackExportExtrasConfig {
                 if (!object.has("exrCompression") && object.has("exrUncompressed")
                         && object.get("exrUncompressed").getAsBoolean()) {
                     INSTANCE.exrCompression = ExrCompression.NONE;
+                }
+                // Migrate the old scene-linear checkbox to the new color
+                // encoding selector (SDR / scene-linear / S-Log3).
+                if (!object.has("exrColorEncoding") && object.has("exrSceneLinearHdr")
+                        && object.get("exrSceneLinearHdr").getAsBoolean()) {
+                    INSTANCE.exrColorEncoding = ExrColorEncoding.SCENE_LINEAR;
                 }
                 // Older configs did not distinguish an automatic timestamp
                 // from a name entered by the user. Recover the old automatic

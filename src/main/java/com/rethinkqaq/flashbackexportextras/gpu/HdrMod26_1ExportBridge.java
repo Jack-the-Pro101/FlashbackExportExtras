@@ -61,11 +61,11 @@ final class HdrMod26_1ExportBridge {
     private int height;
 
     void captureHdr(RenderTarget target, int captureWidth, int captureHeight,
-                    float peakBrightness, long frameId) {
+                    float peakBrightness, long frameId, Enums.TransferFunction transferFunction) {
         RenderSystem.assertOnRenderThread();
         ensureSize(captureWidth, captureHeight);
         if (hdr10Renderer == null) {
-            hdr10Renderer = new ColorTransformRenderer(target, "Flashback Export Extras HDR10");
+            hdr10Renderer = new ColorTransformRenderer(target, "Flashback Export Extras HDR");
             ((HdrModColorTransformAccess) hdr10Renderer)
                     .flashbackexportextras$configureOutput(GL_RGB16, GL_UNSIGNED_SHORT);
         } else if (hdr10Renderer.getSrcTarget() != target) {
@@ -74,10 +74,36 @@ final class HdrMod26_1ExportBridge {
                     .flashbackexportextras$configureOutput(GL_RGB16, GL_UNSIGNED_SHORT);
         }
         hdr10Renderer.updateColorTransformUniforms(peakBrightness, 0.0f,
-                Enums.Primaries.BT2020, Enums.TransferFunction.ST2084_PQ);
+                Enums.Primaries.BT2020, transferFunction);
         hdr10Renderer.render();
         hdr10.issue(hdr10Renderer.getDstTexture(), captureWidth, captureHeight,
                 frameId, GL_UNSIGNED_SHORT);
+    }
+
+    // Backwards compatibility - defaults to PQ (HDR10)
+    void captureHdr(RenderTarget target, int captureWidth, int captureHeight,
+                    float peakBrightness, long frameId) {
+        captureHdr(target, captureWidth, captureHeight, peakBrightness, frameId, 11);
+    }
+
+    // Overload that accepts transfer function as int (11 = PQ, 12 = S-Log3)
+    void captureHdr(RenderTarget target, int captureWidth, int captureHeight,
+                    float peakBrightness, long frameId, int transferFunction) {
+        Enums.TransferFunction tf;
+        if (transferFunction == 12) {
+            // Try to use S-Log3 if available in HDR Mod
+            try {
+                tf = Enums.TransferFunction.valueOf("SLOG3");
+            } catch (IllegalArgumentException e) {
+                // SLOG3 not available in this HDR Mod version, fall back to PQ
+                com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.warn(
+                        "S-Log3 not available in HDR Mod, falling back to PQ (HDR10)");
+                tf = Enums.TransferFunction.ST2084_PQ;
+            }
+        } else {
+            tf = Enums.TransferFunction.ST2084_PQ;
+        }
+        captureHdr(target, captureWidth, captureHeight, peakBrightness, frameId, tf);
     }
 
     void captureSceneLinear(RenderTarget target, int captureWidth, int captureHeight, long frameId) {

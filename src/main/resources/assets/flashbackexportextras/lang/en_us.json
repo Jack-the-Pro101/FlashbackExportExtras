@@ -25,13 +25,18 @@
   "flashbackexportextras.exr_compression_zips_tooltip": "Balanced file size and export speed. Lossless.",
   "flashbackexportextras.exr_compression_none": "None (fastest)",
   "flashbackexportextras.exr_compression_none_tooltip": "Fastest export, but substantially larger files. Lossless.",
-  "flashbackexportextras.exr_scene_linear_hdr": "Scene-linear HDR color",
-  "flashbackexportextras.exr_scene_linear_hdr_tooltip": "Preserve HDR color as scene-linear Rec.709 in the OpenEXR Combined layer.\nValues above 1.0 remain available for Blender and After Effects compositing.",
-  "flashbackexportextras.exr_scene_linear_hdr_unavailable": "Scene-linear HDR color is unavailable in this version or HDR Mod is not enabled. Standard SDR color will be exported.",
+  "flashbackexportextras.exr_scene_linear_hdr_unavailable": "HDR color is unavailable in this version or HDR Mod is not enabled. Standard SDR color will be exported.",
+  "flashbackexportextras.exr_color": "EXR color encoding",
+  "flashbackexportextras.exr_color_tooltip": "Color encoding of the OpenEXR Combined layer.\nScene-linear keeps values above 1.0 for compositing.\nS-Log3 matches the S-Log3 video export (BT.2020 primaries, S-Log3 transfer).",
+  "flashbackexportextras.exr_color_sdr": "Standard (SDR Rec.709)",
+  "flashbackexportextras.exr_color_scene_linear": "Scene-linear Rec.709",
+  "flashbackexportextras.exr_color_slog3": "S-Log3 (BT.2020)",
   "flashbackexportextras.hdr_export": "HDR Export (HDR10)",
   "flashbackexportextras.hdr_export_tooltip": "Export HDR10 video with BT.2020 primaries and ST.2084 PQ transfer function.\nRequires HDR Mod and an HDR-compatible Iris shaderpack.",
   "flashbackexportextras.hdr_peak_brightness": "Peak Brightness (nits)",
-  "flashbackexportextras.hdr_peak_brightness_tooltip": "Maximum display luminance for PQ encoding.\nDefault: 1000 nits (HDR10 standard). Increase for brighter HDR screens.",
+  "flashbackexportextras.hdr_peak_brightness_tooltip": "Maximum display luminance for PQ (HDR10) encoding.\nDefault: 1000 nits (HDR10 standard). Increase for brighter HDR screens.\nNot used by S-Log3, which is scene-referred.",
   "flashbackexportextras.hdr_paper_white": "Paper White (nits)",
-  "flashbackexportextras.hdr_paper_white_tooltip": "SDR reference white level. Diffuse white in the scene\nmaps to this brightness. Default: 203 nits."
+  "flashbackexportextras.hdr_paper_white_tooltip": "SDR reference white level. Diffuse white in the scene\nmaps to this brightness. Default: 203 nits.",
+  "flashbackexportextras.slog3_export": "HDR Export (S-Log3)",
+  "flashbackexportextras.slog3_export_tooltip": "Export 10-bit S-Log3 video with BT.2020 primaries and Sony S-Log3 transfer.\nSDR white maps to 90% scene white; decode with an S-Log3 -> Rec.709 color space transform in your NLE (no exposure change needed).\nVideo containers have no S-Log3 code point, so the transfer characteristic is left unspecified — select S-Log3 in your NLE.\nRequires HDR Mod and an HDR-compatible Iris shaderpack."
 }

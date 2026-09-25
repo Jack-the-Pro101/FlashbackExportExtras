@@ -25,13 +25,18 @@
   "flashbackexportextras.exr_compression_zips_tooltip": "在文件体积和导出速度之间取得平衡。无损压缩。",
   "flashbackexportextras.exr_compression_none": "无压缩（最快）",
   "flashbackexportextras.exr_compression_none_tooltip": "导出速度最快，但文件体积会大幅增加。无损格式。",
-  "flashbackexportextras.exr_scene_linear_hdr": "场景线性 HDR 颜色",
-  "flashbackexportextras.exr_scene_linear_hdr_tooltip": "在 OpenEXR Combined 层中保留 Scene-linear Rec.709 HDR 颜色。\n大于 1.0 的高光可继续用于 Blender 和 After Effects 合成。",
-  "flashbackexportextras.exr_scene_linear_hdr_unavailable": "当前版本不支持场景线性 HDR，或 HDR Mod 尚未启用。将导出标准 SDR 颜色。",
+  "flashbackexportextras.exr_scene_linear_hdr_unavailable": "当前版本不支持 HDR 颜色，或 HDR Mod 尚未启用。将导出标准 SDR 颜色。",
+  "flashbackexportextras.exr_color": "EXR 颜色编码",
+  "flashbackexportextras.exr_color_tooltip": "OpenEXR Combined 层的颜色编码。\nScene-linear 保留大于 1.0 的高光。\nS-Log3 与 S-Log3 视频导出一致 (BT.2020 色域 + S-Log3 传递函数)。",
+  "flashbackexportextras.exr_color_sdr": "标准 (SDR Rec.709)",
+  "flashbackexportextras.exr_color_scene_linear": "场景线性 Rec.709",
+  "flashbackexportextras.exr_color_slog3": "S-Log3 (BT.2020)",
   "flashbackexportextras.hdr_export": "HDR 导出 (HDR10)",
   "flashbackexportextras.hdr_export_tooltip": "导出 HDR10 视频 (BT.2020 色域 + ST.2084 PQ 传递函数)。\n需要安装 HDR Mod 和 HDR 兼容的光影包。",
   "flashbackexportextras.hdr_peak_brightness": "峰值亮度 (nits)",
-  "flashbackexportextras.hdr_peak_brightness_tooltip": "PQ 编码用的最大显示亮度。\n默认：1000 nits (HDR10 标准)。HDR 显示器更亮可调高。",
+  "flashbackexportextras.hdr_peak_brightness_tooltip": "PQ (HDR10) 编码用的最大显示亮度。\n默认：1000 nits (HDR10 标准)。HDR 显示器更亮可调高。\n不适用于场景参照的 S-Log3。",
   "flashbackexportextras.hdr_paper_white": "纸白亮度 (nits)",
-  "flashbackexportextras.hdr_paper_white_tooltip": "SDR 参考白电平。场景中的漫反射白色\n对应此亮度。默认：203 nits。"
+  "flashbackexportextras.hdr_paper_white_tooltip": "SDR 参考白电平。场景中的漫反射白色\n对应此亮度。默认：203 nits。",
+  "flashbackexportextras.slog3_export": "HDR 导出 (S-Log3)",
+  "flashbackexportextras.slog3_export_tooltip": "导出 10-bit S-Log3 视频 (BT.2020 色域 + Sony S-Log3 传递函数)。\nSDR 白色对应 90% 场景白；请在剪辑软件中用 S-Log3 → Rec.709 色彩空间变换解码 (无需调整曝光)。\n视频容器没有 S-Log3 的标准代码点，因此传递函数字段保持 unspecified — 请在剪辑软件中手动选择 S-Log3。\n需要安装 HDR Mod 和 HDR 兼容的光影包。"
 }
