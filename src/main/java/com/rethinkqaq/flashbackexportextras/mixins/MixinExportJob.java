@@ -78,6 +78,9 @@ public class MixinExportJob {
     private boolean isExrSLog3Encoding;
 
     @Unique
+    private boolean isExrAcesCctEncoding;
+
+    @Unique
     private boolean isHdrMode;
 
     @Unique
@@ -134,7 +137,8 @@ public class MixinExportJob {
                 settings.output(), settings.container(), settings.resolutionX(), settings.resolutionY(), tempFileName);
         flashbackexportextras$configureExportModes();
         if (isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
-                != FlashbackExportExtrasConfig.ExrColorEncoding.SDR && !isExrSceneLinearHdr) {
+                != FlashbackExportExtrasConfig.ExrColorEncoding.SDR
+                && !isExrSceneLinearHdr && !isExrSLog3Encoding) {
             FlashbackExportExtras.LOGGER.warn(
                     "HDR EXR color is unavailable in this runtime; exporting standard SDR color");
         }
@@ -157,20 +161,29 @@ public class MixinExportJob {
             int w = settings.resolutionX();
             int h = settings.resolutionY();
             return new ExrVideoWriter(outputDir, w, h, isExrSceneLinearHdr, isExrSLog3Encoding,
-                    FlashbackExportExtrasConfig.INSTANCE.getExrCompression());
+                    isExrAcesCctEncoding, FlashbackExportExtrasConfig.INSTANCE.getExrCompression());
         }
         /*? if hdr {*/
         if (isHdrMode || isSLog3Mode) {
             String encoder = HdrVideoWriter.resolveVideoEncoder(
                     settings.codec() == null ? null : settings.codec().name(),
                     settings.encoder());
-            if (encoder == null) {
-                // Codec cannot carry HDR 10-bit (image codecs, qtrle, qsv/vaapi);
-                // fall back to Flashback's normal SDR writer.
+            if (encoder == null || tempFileName == null) {
+                if (HdrVideoWriter.isH264HardwareEncoder(settings.encoder())) {
+                    // H.264 hardware is 8-bit only; refuse the export instead
+                    // of silently degrading to SDR.
+                    throw new IOException("HDR export is not supported with the H.264 hardware encoder '"
+                            + settings.encoder() + "' (8-bit only). "
+                            + "Use H.265/AV1/ProRes or the software libx264 encoder.");
+                }
+                // Codec cannot carry HDR 10-bit (image codecs, qtrle, qsv/vaapi)
+                // or the temp file name is unavailable; fall back to Flashback's
+                // normal SDR writer.
                 FlashbackExportExtras.LOGGER.warn(
-                        "HDR export: codec/encoder {} ({}) cannot carry HDR 10-bit color; " +
+                        "HDR export: codec/encoder {} ({}) cannot carry HDR 10-bit color{}; " +
                         "exporting standard SDR instead",
-                        settings.codec(), settings.encoder());
+                        settings.codec(), settings.encoder(),
+                        tempFileName == null ? " (temp file name unavailable)" : "");
                 isHdrMode = false;
                 isSLog3Mode = false;
             } else {
@@ -179,6 +192,9 @@ public class MixinExportJob {
                 int h = settings.resolutionY();
                 FlashbackExportExtras.LOGGER.info("HDR export temporary path: {}, final path: {}", tempPath, settings.output());
                 boolean prores = encoder.toLowerCase(java.util.Locale.ROOT).startsWith("prores");
+                // Bitrate comes from Flashback's own controls: the bitrate
+                // textbox value, or 0 when "use maximum bitrate" is checked
+                // (or the box is empty) — then fall back to a heuristic.
                 int bitrate;
                 if (settings.bitrate() > 0) {
                     bitrate = settings.bitrate();
@@ -197,7 +213,9 @@ public class MixinExportJob {
                         settings.recordAudio() ? (settings.stereoAudio() ? 2 : 1) : 0,
                         settings.audioCodec() == null ? "AAC" : settings.audioCodec().name(),
                         settings.codec() == null ? null : settings.codec().name(),
-                        encoder);
+                        encoder,
+                        FlashbackExportExtrasConfig.INSTANCE.hdrCrf,
+                        FlashbackExportExtrasConfig.INSTANCE.getHdrQualityPreset());
                 return hdrWriterRef;
             }
         }
@@ -214,20 +232,32 @@ public class MixinExportJob {
 
     @Unique
     private void flashbackexportextras$configureExportModes() {
+        isExrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.EXR;
+        FlashbackExportExtrasConfig.ExrColorEncoding exrColor =
+                FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding();
         /*? if hdr {*/
         isHdrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10
                 && HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr();
         isSLog3Mode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3
                 && HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr();
+        // S-Log3 EXR ingests the GPU-transformed RGBA16 frames of the HDR
+        // video pipeline, so it needs the same HDR transform support.
+        isExrSLog3Encoding = isExrMode
+                && exrColor == FlashbackExportExtrasConfig.ExrColorEncoding.S_LOG3
+                && HdrExportState.isAvailable()
+                && GpuExportBackendFactory.get().supportsHdr();
         /*?} else {*/
         /*isHdrMode = false;
         isSLog3Mode = false;
+        isExrSLog3Encoding = false;
         *//*?}*/
-        isExrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.EXR;
-        isExrSLog3Encoding = isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
-                == FlashbackExportExtrasConfig.ExrColorEncoding.S_LOG3;
-        isExrSceneLinearHdr = isExrMode && FlashbackExportExtrasConfig.INSTANCE.getExrColorEncoding()
-                != FlashbackExportExtrasConfig.ExrColorEncoding.SDR
+        isExrAcesCctEncoding = isExrMode
+                && exrColor == FlashbackExportExtrasConfig.ExrColorEncoding.ACES_CCT;
+        // Scene-linear GPU capture feeds the SCENE_LINEAR and ACES_CCT
+        // encodings; S_LOG3 reads the HDR transform's RGBA16 frames instead.
+        isExrSceneLinearHdr = isExrMode
+                && (exrColor == FlashbackExportExtrasConfig.ExrColorEncoding.SCENE_LINEAR
+                    || exrColor == FlashbackExportExtrasConfig.ExrColorEncoding.ACES_CCT)
                 && HdrExportState.isAvailable()
                 && GpuExportBackendFactory.get().supportsSceneLinearHdr();
     }
@@ -335,18 +365,18 @@ public class MixinExportJob {
     @Unique
     private void flashbackexportextras$captureHdrBeforeDownload(RenderTarget target) {
         /*? if hdr {*/
-        if (!isHdrMode && !isSLog3Mode) return;
+        if (!isHdrMode && !isSLog3Mode && !isExrSLog3Encoding) return;
         if (target == null) return;
 
         float peak = HdrExportState.getPeakBrightness();
         long frameId = flashbackexportextras_hdrCaptureFrameCount++;
-        int transferFunction = isSLog3Mode ? 12 : 11; // 12 = S-Log3, 11 = PQ (HDR10)
+        // S-Log3 (video and EXR) uses transfer 12, HDR10 uses PQ (11). The
+        // S-Log3 EXR pipeline ingests these GPU RGBA16 frames directly.
+        int transferFunction = (isSLog3Mode || isExrSLog3Encoding) ? 12 : 11;
+        // Color transform + 16-bit readback: scRGB-nl → BT.2020 + PQ/S-Log3
         GpuExportBackendFactory.get().captureHdr(
                 target, target.width, target.height, peak, frameId, transferFunction);
         flashbackexportextras$drainHdrFrames();
-
-        // Step 1: Color transform — scRGB-nl → BT.2020 + PQ/S-Log3
-
         /*?}*/
     }
 
@@ -513,6 +543,7 @@ public class MixinExportJob {
         isExrMode = false;
         isExrSceneLinearHdr = false;
         isExrSLog3Encoding = false;
+        isExrAcesCctEncoding = false;
         isHdrMode = false;
         isSLog3Mode = false;
         flashbackexportextras_nextDepthColorFrameId = 0L;

@@ -28,6 +28,9 @@ import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig.ExportMode;
 import com.rethinkqaq.flashbackexportextras.exporting.CameraPathExporter;
 import com.rethinkqaq.flashbackexportextras.exporting.HdrExportState;
+//? if hdr {
+import com.rethinkqaq.flashbackexportextras.exporting.HdrVideoWriter;
+//?}
 import com.rethinkqaq.flashbackexportextras.gpu.GpuExportBackendFactory;
 import imgui.moulberry90.ImGui;
 import imgui.moulberry90.type.ImString;
@@ -67,6 +70,9 @@ public class MixinStartExportWindow {
     @Inject(method = "createExportSettings", at = @At("RETURN"), remap = false)
     private static void flashbackexportextras$traceExportSettings(String jobName, FlashbackConfigV1 config,
                                                            CallbackInfoReturnable<CompletableFuture<ExportSettings>> cir) {
+        // The settings future reads the codec fields only after the dialog
+        // completes, so clamping here covers every export start path.
+        flashbackexportextras$sanitizeInternalExport(config);
         CompletableFuture<ExportSettings> future = cir.getReturnValue();
         com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.info(
                 "Export settings request created: jobName={}, container={}, future={}",
@@ -113,22 +119,49 @@ public class MixinStartExportWindow {
             FlashbackExportExtrasConfig.save();
         }
 
+        if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() != ExportMode.EXR) {
+            // Audio directionality option for all video exports (EXR has no audio)
+            boolean stereo = FlashbackExportExtrasConfig.INSTANCE.forceStereoAudio;
+            if (ImGui.checkbox(I18n.get("flashbackexportextras.stereo_audio"), stereo)) {
+                FlashbackExportExtrasConfig.INSTANCE.forceStereoAudio = !stereo;
+                FlashbackExportExtrasConfig.save();
+            }
+            if (ImGui.isItemHovered()) {
+                ImGui.setTooltip(I18n.get("flashbackexportextras.stereo_audio_tooltip"));
+            }
+            if (stereo && config.internalExport.recordAudio) {
+                // The export audio is rendered through an OpenAL loopback
+                // device whose layout follows stereoAudio: mono collapses
+                // all spatial directionality at capture time.
+                config.internalExport.stereoAudio = true;
+            }
+        }
+
         if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.EXR) {
             // Force container to PNG_SEQUENCE (triggers folder picker)
             config.internalExport.container =
                     com.moulberry.flashback.combo_options.VideoContainer.PNG_SEQUENCE;
 
+            // Flashback 0.43.4's built-in depth-map export replaces the
+            // startDownload call in doExport with tryDepthDownload(), which
+            // bypasses this mod's entire EXR capture chain. Our EXR output
+            // embeds per-frame depth already, so force the classic path.
+            /*? if >=26.1 {*/
+            /*config.internalExport.depthMap = false;
+            *//*?}*/
+
             // Flashback still builds a complete ExportSettings object for a
             // PNG_SEQUENCE export before our ExportJob writer redirect runs.
-            // Since EXR mode skips Flashback's normal codec controls, the
-            // codec fields may otherwise remain null and createExportSettings
-            // fails before the ExportJob is queued.
-            if (config.internalExport.videoCodec == null) {
-                config.internalExport.videoCodec = VideoCodec.H264;
-            }
-            if (config.internalExport.selectedVideoEncoder == null
-                    || config.internalExport.selectedVideoEncoder.length == 0) {
-                config.internalExport.selectedVideoEncoder = new int[]{0};
+            // Since EXR mode cancels Flashback's renderVideoOptions (including
+            // the encoder-index reset it performs on container changes), keep
+            // the codec fields in a consistent state here. The EXR writer
+            // ignores the codec entirely, so always reset the encoder index —
+            // index 0 is the only value guaranteed valid for whichever codec
+            // the settings builder resolves for PNG_SEQUENCE.
+            flashbackexportextras$sanitizeInternalExport(config);
+            if (config.internalExport.selectedVideoEncoder != null
+                    && config.internalExport.selectedVideoEncoder.length > 0) {
+                config.internalExport.selectedVideoEncoder[0] = 0;
             }
 
             // Force SSAA off
@@ -182,15 +215,24 @@ public class MixinStartExportWindow {
                     FlashbackExportExtrasConfig.INSTANCE.exrCompression = FlashbackExportExtrasConfig.ExrCompression.ZIP;
                     FlashbackExportExtrasConfig.save();
                 }
+                if (ImGui.isItemHovered()) {
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.exr_compression_zip_tooltip"));
+                }
                 if (ImGui.selectable(I18n.get("flashbackexportextras.exr_compression_zips"),
                         compression == FlashbackExportExtrasConfig.ExrCompression.ZIPS)) {
                     FlashbackExportExtrasConfig.INSTANCE.exrCompression = FlashbackExportExtrasConfig.ExrCompression.ZIPS;
                     FlashbackExportExtrasConfig.save();
                 }
+                if (ImGui.isItemHovered()) {
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.exr_compression_zips_tooltip"));
+                }
                 if (ImGui.selectable(I18n.get("flashbackexportextras.exr_compression_none"),
                         compression == FlashbackExportExtrasConfig.ExrCompression.NONE)) {
                     FlashbackExportExtrasConfig.INSTANCE.exrCompression = FlashbackExportExtrasConfig.ExrCompression.NONE;
                     FlashbackExportExtrasConfig.save();
+                }
+                if (ImGui.isItemHovered()) {
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.exr_compression_none_tooltip"));
                 }
                 ImGui.endCombo();
             }
@@ -208,6 +250,7 @@ public class MixinStartExportWindow {
                     case SDR -> I18n.get("flashbackexportextras.exr_color_sdr");
                     case SCENE_LINEAR -> I18n.get("flashbackexportextras.exr_color_scene_linear");
                     case S_LOG3 -> I18n.get("flashbackexportextras.exr_color_slog3");
+                    case ACES_CCT -> I18n.get("flashbackexportextras.exr_color_acescct");
                 };
                 if (ImGui.beginCombo(I18n.get("flashbackexportextras.exr_color"), encodingLabel)) {
                     for (FlashbackExportExtrasConfig.ExrColorEncoding candidate
@@ -216,6 +259,7 @@ public class MixinStartExportWindow {
                             case SDR -> I18n.get("flashbackexportextras.exr_color_sdr");
                             case SCENE_LINEAR -> I18n.get("flashbackexportextras.exr_color_scene_linear");
                             case S_LOG3 -> I18n.get("flashbackexportextras.exr_color_slog3");
+                            case ACES_CCT -> I18n.get("flashbackexportextras.exr_color_acescct");
                         };
                         if (ImGui.selectable(candidateLabel, candidate == encoding)) {
                             FlashbackExportExtrasConfig.INSTANCE.exrColorEncoding = candidate;
@@ -241,8 +285,33 @@ public class MixinStartExportWindow {
         /*? if hdr {*/
         // === HDR Export options (only shown when HDR Mod is available) ===
         if (HdrExportState.isAvailable() && GpuExportBackendFactory.get().supportsHdr()) {
+            ExportMode currentMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode();
+            if (currentMode == ExportMode.HDR10 || currentMode == ExportMode.S_LOG3) {
+                // The HDR video pipeline hooks the same startDownload call as
+                // EXR mode; Flashback's built-in depth-map path would bypass
+                // it and the export would fail its readback verification.
+                /*? if >=26.1 {*/
+                /*config.internalExport.depthMap = false;
+                *//*?}*/
+            }
             ImGui.spacing();
-            
+
+            // H.264 hardware encoders are 8-bit only and cannot carry 10-bit
+            // HDR: block the HDR modes instead of silently exporting SDR.
+            boolean h264Hardware = HdrVideoWriter.isH264HardwareEncoder(
+                    flashbackexportextras$selectedEncoderName());
+            if (h264Hardware && (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10
+                    || FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3)) {
+                FlashbackExportExtrasConfig.INSTANCE.setExportMode(ExportMode.VIDEO);
+                FlashbackExportExtrasConfig.save();
+            }
+            if (h264Hardware) {
+                ImGui.textWrapped(I18n.get("flashbackexportextras.hdr_h264_hw_note"));
+                ImGui.spacing();
+            }
+
+            ImGui.beginDisabled(h264Hardware);
+
             // HDR10 Export option
             boolean hdr10 = FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10;
             if (ImGui.checkbox(I18n.get("flashbackexportextras.hdr_export"), hdr10)) {
@@ -263,55 +332,123 @@ public class MixinStartExportWindow {
                 ImGui.setTooltip(I18n.get("flashbackexportextras.slog3_export_tooltip"));
             }
 
-            // Settings for HDR10 mode
-            if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.HDR10) {
-                // Peak brightness slider
-                int[] peak = {FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness};
-                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_peak_brightness"), peak, 500, 4000)) {
-                    FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness = peak[0];
-                    HdrExportState.setPeakBrightness((float) peak[0]);
-                    FlashbackExportExtrasConfig.save();
-                }
-                if (ImGui.isItemHovered()) {
-                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_peak_brightness_tooltip"));
+            ImGui.endDisabled();
+
+            // Shared encoder settings for HDR10 / S-Log3 video export
+            ExportMode hdrMode = FlashbackExportExtrasConfig.INSTANCE.getExportMode();
+            if (hdrMode == ExportMode.HDR10 || hdrMode == ExportMode.S_LOG3) {
+                if (hdrMode == ExportMode.HDR10) {
+                    // Peak brightness slider (PQ only — S-Log3 is scene-referred)
+                    int[] peak = {FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness};
+                    if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_peak_brightness"), peak, 500, 4000)) {
+                        FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness = peak[0];
+                        HdrExportState.setPeakBrightness((float) peak[0]);
+                        FlashbackExportExtrasConfig.save();
+                    }
+                    if (ImGui.isItemHovered()) {
+                        ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_peak_brightness_tooltip"));
+                    }
                 }
 
-                // Paper white brightness slider
-                int[] paperWhite = {FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits};
-                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_paper_white"), paperWhite, 80, 500)) {
-                    FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits = paperWhite[0];
-                    FlashbackExportExtrasConfig.save();
+                // FFmpeg quality preset combo
+                String preset = FlashbackExportExtrasConfig.INSTANCE.getHdrQualityPreset();
+                if (ImGui.beginCombo(I18n.get("flashbackexportextras.hdr_quality_preset"), preset)) {
+                    for (String candidate : FlashbackExportExtrasConfig.HDR_QUALITY_PRESETS) {
+                        if (ImGui.selectable(candidate, candidate.equals(preset))) {
+                            FlashbackExportExtrasConfig.INSTANCE.hdrQualityPreset = candidate;
+                            FlashbackExportExtrasConfig.save();
+                        }
+                    }
+                    ImGui.endCombo();
                 }
                 if (ImGui.isItemHovered()) {
-                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_paper_white_tooltip"));
-                }
-            }
-
-            // Settings for S-Log3 mode
-            if (FlashbackExportExtrasConfig.INSTANCE.getExportMode() == ExportMode.S_LOG3) {
-                // Peak brightness slider
-                int[] peak = {FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness};
-                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_peak_brightness"), peak, 500, 4000)) {
-                    FlashbackExportExtrasConfig.INSTANCE.hdrPeakBrightness = peak[0];
-                    HdrExportState.setPeakBrightness((float) peak[0]);
-                    FlashbackExportExtrasConfig.save();
-                }
-                if (ImGui.isItemHovered()) {
-                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_peak_brightness_tooltip"));
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_quality_preset_tooltip"));
                 }
 
-                // Paper white brightness slider
-                int[] paperWhite = {FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits};
-                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_paper_white"), paperWhite, 80, 500)) {
-                    FlashbackExportExtrasConfig.INSTANCE.hdrPaperWhiteNits = paperWhite[0];
+                // Constant-quality slider (CRF/CQ — encoders that support it)
+                int[] crf = {FlashbackExportExtrasConfig.INSTANCE.hdrCrf};
+                if (ImGui.sliderInt(I18n.get("flashbackexportextras.hdr_crf"), crf, 0, 51)) {
+                    FlashbackExportExtrasConfig.INSTANCE.hdrCrf = crf[0];
                     FlashbackExportExtrasConfig.save();
                 }
                 if (ImGui.isItemHovered()) {
-                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_paper_white_tooltip"));
+                    ImGui.setTooltip(I18n.get("flashbackexportextras.hdr_crf_tooltip"));
                 }
+
+                // Encoders without CRF use Flashback's own bitrate field,
+                // which renders below this block (renderVideoOptions HEAD).
+                ImGui.textWrapped(I18n.get("flashbackexportextras.hdr_bitrate_hint"));
+
+                ImGui.spacing();
+                ImGui.textWrapped(I18n.get("flashbackexportextras.hdr_codec_note"));
             }
         }
         /*?}*/
+    }
+
+    /**
+     * Keeps Flashback's internal codec fields consistent. Flashback's
+     * settings builder resolves the effective codec against the container:
+     * when the saved codec is not in {@code container.getSupportedVideoCodecs}
+     * it silently falls back to that list's first entry — a codec that may
+     * have far fewer encoders than the saved one. A stale
+     * {@code selectedVideoEncoder} index then makes createExportSettings fail
+     * with an ArrayIndexOutOfBoundsException inside its settings future (a
+     * silent no-op after the folder dialog). EXR mode also cancels
+     * renderVideoOptions, which is where Flashback normally resets the index,
+     * so mirror the builder's codec resolution and clamp the index against it.
+     */
+    private static void flashbackexportextras$sanitizeInternalExport(FlashbackConfigV1 config) {
+        if (config == null || config.internalExport == null) return;
+        com.moulberry.flashback.configuration.FlashbackConfigV1.SubcategoryInternalExport internal =
+                config.internalExport;
+        if (internal.videoCodec == null) {
+            internal.videoCodec = VideoCodec.H264;
+        }
+        VideoCodec effective = internal.videoCodec;
+        if (internal.container != null) {
+            try {
+                VideoCodec[] supported = internal.container.getSupportedVideoCodecs(false);
+                if (supported != null && supported.length > 0
+                        && !java.util.Arrays.asList(supported).contains(effective)) {
+                    effective = supported[0];
+                }
+            } catch (Throwable ignored) {
+                // Fall back to clamping against the saved codec below.
+            }
+        }
+        String[] encoders = effective.getEncoders();
+        int[] selection = internal.selectedVideoEncoder;
+        if (selection == null || selection.length == 0) {
+            internal.selectedVideoEncoder = new int[]{0};
+        } else if (encoders == null || encoders.length == 0
+                || selection[0] < 0 || selection[0] >= encoders.length) {
+            // Stale index (e.g. left over from a video export with a codec
+            // that had more encoders) — reset to the always-valid first entry.
+            selection[0] = 0;
+        }
+    }
+
+    /**
+     * Reads the encoder Flashback's export window currently has selected
+     * ({@code internalExport.selectedVideoEncoder} indexes the selected
+     * codec's encoder list), or null when no explicit encoder is chosen.
+     */
+    private static String flashbackexportextras$selectedEncoderName() {
+        try {
+            com.moulberry.flashback.configuration.FlashbackConfigV1 config =
+                    com.moulberry.flashback.Flashback.getConfig();
+            if (config == null || config.internalExport == null) return null;
+            com.moulberry.flashback.combo_options.VideoCodec codec = config.internalExport.videoCodec;
+            int[] selection = config.internalExport.selectedVideoEncoder;
+            if (codec == null || selection == null || selection.length == 0) return null;
+            String[] encoders = codec.getEncoders();
+            int index = selection[0];
+            if (encoders == null || index < 0 || index >= encoders.length) return null;
+            return encoders[index];
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     // === Camera path options: injected before the start/queue buttons ===

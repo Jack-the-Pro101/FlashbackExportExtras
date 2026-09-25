@@ -70,6 +70,7 @@ public class MultiLayerExrWriter implements AutoCloseable {
     private final boolean linearizeDepth;
     private final boolean sceneLinearHdr;
     private final boolean sLog3Encoding;
+    private final boolean acesCctEncoding;
     private final int compressionType;
     private int frameCount;
     private boolean closed = false;
@@ -89,13 +90,15 @@ public class MultiLayerExrWriter implements AutoCloseable {
     private final List<ByteBuffer> customAttributeBuffers;
 
     public MultiLayerExrWriter(Path outputDir, int width, int height, boolean linearizeDepth,
-                               boolean sceneLinearHdr, boolean sLog3Encoding, ExrCompression compression) throws IOException {
+                               boolean sceneLinearHdr, boolean sLog3Encoding, boolean acesCctEncoding,
+                               ExrCompression compression) throws IOException {
         this.outputDir = outputDir;
         this.width = width;
         this.height = height;
         this.linearizeDepth = linearizeDepth;
         this.sceneLinearHdr = sceneLinearHdr;
         this.sLog3Encoding = sLog3Encoding;
+        this.acesCctEncoding = acesCctEncoding;
         this.compressionType = switch (compression == null ? ExrCompression.ZIP : compression) {
             case NONE -> TinyEXR.TINYEXR_COMPRESSIONTYPE_NONE;
             case ZIPS -> TinyEXR.TINYEXR_COMPRESSIONTYPE_ZIPS;
@@ -150,19 +153,28 @@ public class MultiLayerExrWriter implements AutoCloseable {
             ByteBuffer attributeType = MemoryUtil.memUTF8("chromaticities");
             ByteBuffer chromaticities = MemoryUtil.memAlloc(8 * Float.BYTES)
                     .order(ByteOrder.LITTLE_ENDIAN);
+            float whiteX = 0.3127f;
+            float whiteY = 0.3290f;
             if (sLog3Encoding) {
                 // BT.2020/UHD primaries and D65 white, in OpenEXR
                 // chromaticities order (red, green, blue, white xy pairs).
                 chromaticities.putFloat(0.7080f).putFloat(0.2920f);
                 chromaticities.putFloat(0.1700f).putFloat(0.7970f);
                 chromaticities.putFloat(0.1310f).putFloat(0.0460f);
+            } else if (acesCctEncoding) {
+                // ACES AP1 primaries (ACEScg) with the ACES white (~D60).
+                chromaticities.putFloat(0.7130f).putFloat(0.2930f);
+                chromaticities.putFloat(0.1650f).putFloat(0.8300f);
+                chromaticities.putFloat(0.1280f).putFloat(0.0440f);
+                whiteX = 0.32168f;
+                whiteY = 0.33767f;
             } else {
                 // Rec.709/sRGB primaries and D65 white.
                 chromaticities.putFloat(0.6400f).putFloat(0.3300f);
                 chromaticities.putFloat(0.3000f).putFloat(0.6000f);
                 chromaticities.putFloat(0.1500f).putFloat(0.0600f);
             }
-            chromaticities.putFloat(0.3127f).putFloat(0.3290f).flip();
+            chromaticities.putFloat(whiteX).putFloat(whiteY).flip();
             customAttributes.get(0)
                     .name(attributeName)
                     .type(attributeType)
@@ -187,10 +199,19 @@ public class MultiLayerExrWriter implements AutoCloseable {
         frameCount++;
     }
 
-    /** Writes scene-linear Rec.709 (or S-Log3/BT.2020) RGBA16F color with the matching depth frame. */
-    public void writeHdrFrame(ByteBuffer rgba16f, DepthCaptureState.DepthFrame depthFrame,
+    /**
+     * Writes HDR color with the matching depth frame. The buffer is either a
+     * scene-linear Rec.709 RGBA16F frame (kept linear or ACEScct-encoded) or a
+     * GPU-encoded S-Log3/BT.2020 RGBA16 frame from the HDR video pipeline.
+     */
+    public void writeHdrFrame(ByteBuffer hdrColor, DepthCaptureState.DepthFrame depthFrame,
                               int frameNumber) throws IOException {
-        fillSceneLinearHdrColor(rgba16f);
+        if (sLog3Encoding) {
+            // Already encoded on the GPU: 16-bit UNORM S-Log3 code values.
+            fillSLog3Color(hdrColor);
+        } else {
+            fillSceneLinearHdrColor(hdrColor);
+        }
         fillDepth(depthFrame);
         writeExr(frameNumber);
         frameCount++;
@@ -232,11 +253,10 @@ public class MultiLayerExrWriter implements AutoCloseable {
             throw new IllegalArgumentException("RGBA16F frame is too small: "
                     + data.remaining() + " < " + requiredBytes);
         }
-        if (sLog3Encoding) {
-            // Input is scene-linear Rec.709; convert to BT.2020 and apply the
-            // same S-Log3 encoding as the S-Log3 video pipeline. The result is
-            // S-Log3 code values in [0,1] with BT.2020 primaries (declared via
-            // the chromaticities header attribute).
+        if (acesCctEncoding) {
+            // Input is scene-linear Rec.709; convert to AP1 and apply the
+            // ACEScct log encoding (AMPAS S-2016-001, matches OCIO). The
+            // result is declared via the AP1 chromaticities header attribute.
             for (int i = 0; i < pixelCount; i++) {
                 int offset = i * 8;
                 float lr = halfToFloat(data.getShort(offset));
@@ -245,9 +265,9 @@ public class MultiLayerExrWriter implements AutoCloseable {
                 float a = halfToFloat(data.getShort(offset + 6));
                 // Matrix multiply needs the original linear values, so compute
                 // all three outputs from lr/lg/lb before overwriting them.
-                rBuf.put(i, sLog3Encode(BT709_TO_BT2020_00 * lr + BT709_TO_BT2020_01 * lg + BT709_TO_BT2020_02 * lb));
-                gBuf.put(i, sLog3Encode(BT709_TO_BT2020_10 * lr + BT709_TO_BT2020_11 * lg + BT709_TO_BT2020_12 * lb));
-                bBuf.put(i, sLog3Encode(BT709_TO_BT2020_20 * lr + BT709_TO_BT2020_21 * lg + BT709_TO_BT2020_22 * lb));
+                rBuf.put(i, acesCctEncode(AP1_FROM_709_00 * lr + AP1_FROM_709_01 * lg + AP1_FROM_709_02 * lb));
+                gBuf.put(i, acesCctEncode(AP1_FROM_709_10 * lr + AP1_FROM_709_11 * lg + AP1_FROM_709_12 * lb));
+                bBuf.put(i, acesCctEncode(AP1_FROM_709_20 * lr + AP1_FROM_709_21 * lg + AP1_FROM_709_22 * lb));
                 aBuf.put(i, a);
             }
         } else {
@@ -261,25 +281,60 @@ public class MultiLayerExrWriter implements AutoCloseable {
         }
     }
 
-    // === S-Log3 encoding (Sony S-Log3 specification, matches the HDR shaders) ===
-    // BT.709 → BT.2020 gamut conversion matrix (row-major, same as GLSL version).
-    private static final float BT709_TO_BT2020_00 = 0.6274039149f;
-    private static final float BT709_TO_BT2020_01 = 0.0690972880f;
-    private static final float BT709_TO_BT2020_02 = 0.0163914394f;
-    private static final float BT709_TO_BT2020_10 = 0.3292830288f;
-    private static final float BT709_TO_BT2020_11 = 0.9195404053f;
-    private static final float BT709_TO_BT2020_12 = 0.0880133063f;
-    private static final float BT709_TO_BT2020_20 = 0.0433130561f;
-    private static final float BT709_TO_BT2020_21 = 0.0113922066f;
-    private static final float BT709_TO_BT2020_22 = 0.8955952542f;
-    /** S-Log3 is scene-referred: SDR white (1.0) = Sony's 90% scene white. */
-    private static final float S_LOG3_SDR_WHITE_SCALE = 0.9f;
+    /**
+     * Ingests a GPU-encoded S-Log3/BT.2020 RGBA16 frame — the exact same
+     * 16-bit UNORM data the S-Log3 video pipeline feeds to FFmpeg. The GPU
+     * already applied sRGB decode, BT.709 → BT.2020 and the S-Log3 curve, so
+     * this is a straight UNORM16 → float conversion.
+     */
+    private void fillSLog3Color(ByteBuffer rgba16) {
+        int pixelCount = width * height;
+        int requiredBytes = pixelCount * 8;
+        ByteBuffer data = rgba16.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        data.rewind();
+        if (data.remaining() < requiredBytes) {
+            throw new IllegalArgumentException("RGBA16 S-Log3 frame is too small: "
+                    + data.remaining() + " < " + requiredBytes);
+        }
+        float inv65535 = 1.0f / 65535.0f;
+        for (int i = 0; i < pixelCount; i++) {
+            int offset = i * 8;
+            rBuf.put(i, (data.getShort(offset) & 0xFFFF) * inv65535);
+            gBuf.put(i, (data.getShort(offset + 2) & 0xFFFF) * inv65535);
+            bBuf.put(i, (data.getShort(offset + 4) & 0xFFFF) * inv65535);
+            aBuf.put(i, (data.getShort(offset + 6) & 0xFFFF) * inv65535);
+        }
+    }
 
-    /** S-Log3: V = (420 + log10((L + 0.01) / 0.19) * 261.5) / 1023, L = linear * 0.9. */
-    private float sLog3Encode(float linear) {
-        float l = Math.max(linear, 0.0f) * S_LOG3_SDR_WHITE_SCALE;
-        float v = (420.0f + (float) Math.log10((l + 0.01) / 0.19) * 261.5f) / 1023.0f;
-        return Math.min(Math.max(v, 0.0f), 1.0f);
+    // === ACEScct encoding (AMPAS S-2016-001; constants match OCIO exactly) ===
+    // Rec.709 → AP1 (ACEScg) gamut matrix, computed with the ACES-standard
+    // Bradford CAT from D65 to the ACES white (Lib.Academy.ColorSpaces.ctl).
+    private static final float AP1_FROM_709_00 = 0.6003059002f;
+    private static final float AP1_FROM_709_01 = 0.3332993445f;
+    private static final float AP1_FROM_709_02 = 0.0663947552f;
+    private static final float AP1_FROM_709_10 = 0.0727535602f;
+    private static final float AP1_FROM_709_11 = 0.9200579845f;
+    private static final float AP1_FROM_709_12 = 0.0071884553f;
+    private static final float AP1_FROM_709_20 = 0.0250321333f;
+    private static final float AP1_FROM_709_21 = 0.1093703672f;
+    private static final float AP1_FROM_709_22 = 0.8655974994f;
+    /** Log segment: ACEScct = (log2(x) + 9.72) / 17.52 for x ≥ 2^-7. */
+    private static final float ACES_CCT_LOG_K = 17.52f;
+    private static final float ACES_CCT_LOG_B = 9.72f;
+    private static final float ACES_CCT_BREAK = 0.0078125f;
+    private static final float INV_LOG2 = 1.4426950408889634f;
+    /**
+     * Linear toe below the break (C0/C1-continuous with the log segment):
+     * ACEScct = 10.5402377416545 * x + 0.0729055341958354.
+     */
+    private static final float ACES_CCT_TOE_SLOPE = 10.5402377416545f;
+    private static final float ACES_CCT_TOE_OFFSET = 0.0729055341958354f;
+
+    private static float acesCctEncode(float lin) {
+        if (lin >= ACES_CCT_BREAK) {
+            return ((float) Math.log(lin) * INV_LOG2 + ACES_CCT_LOG_B) / ACES_CCT_LOG_K;
+        }
+        return lin * ACES_CCT_TOE_SLOPE + ACES_CCT_TOE_OFFSET;
     }
 
     private static float halfToFloat(short half) {

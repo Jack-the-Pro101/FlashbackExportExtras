@@ -98,6 +98,7 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
     private int sceneLinearWidth;
     private int sceneLinearHeight;
     private boolean sceneLinearReadbackFailed;
+    private boolean sceneLinearSkipWarned;
     private GpuTexture depthCopyTexture;
     private GpuTextureView depthCopyView;
     private RenderPipeline depthCopyPipeline;
@@ -152,8 +153,15 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
 
             CommandEncoder encoder = clearEncoder != null
                     ? clearEncoder : RenderSystem.getDevice().createCommandEncoder();
-            boolean ownsEncoder = clearEncoder == null;
             //? if >=26.2 {
+            // The caller's clear encoder can be part of a deferred (Iris)
+            // command stream: a fence recorded on it is then never submitted,
+            // and the depth readback silently times out with zero delivered
+            // frames. Use a private encoder and submit immediately — the same
+            // pattern as the working HDR/scene-linear paths — which also
+            // guarantees the depth copy executes before control returns to
+            // the caller's clear.
+            CommandEncoder depthEncoder = RenderSystem.getDevice().createCommandEncoder();
             GpuTexture texture = target.getDepthTexture();
             GpuTextureView textureView = target.getDepthTextureView();
             if (texture == null || textureView == null) {
@@ -161,10 +169,10 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
             }
             boolean reversed = !com.rethinkqaq.flashbackexportextras.exporting.IrisDepthCaptureState
                     .isShaderPackPipelineActive();
-            captureDepth26_2(encoder, texture, textureView, width, height, depthFar, frameId, index,
+            captureDepth26_2(depthEncoder, texture, textureView, width, height, depthFar, frameId, index,
                     reversed, reversed ? "Minecraft 26.2 reversed-Z depth"
                             : "Iris shaderpack main depth (standard-Z)");
-            if (ownsEncoder) encoder.submit();
+            depthEncoder.submit();
             //?}
             //? if <26.2 {
             GpuTexture texture = target.getDepthTexture();
@@ -298,7 +306,16 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
     public void captureSceneLinearHdr(RenderTarget target, int width, int height, long frameId) {
         //? if >=26.2 {
         if (target == null || target.getColorTexture() == null
-                || target.getColorTextureView() == null || sceneLinearReadbackFailed) return;
+                || target.getColorTextureView() == null || sceneLinearReadbackFailed) {
+            if (!sceneLinearSkipWarned) {
+                sceneLinearSkipWarned = true;
+                com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.warn(
+                        "Scene-linear capture skipped for frame {} (targetNull={}, colorNull={}, viewNull={}, previouslyFailed={})",
+                        frameId, target == null, target == null || target.getColorTexture() == null,
+                        target == null || target.getColorTextureView() == null, sceneLinearReadbackFailed);
+            }
+            return;
+        }
         try {
             RenderSystem.assertOnRenderThread();
             ensureSceneLinearTarget(width, height);
@@ -636,7 +653,14 @@ public final class Blaze3dExportBackend implements GpuExportBackend {
     private boolean collectDepth(int index, long timeoutNanos) {
         GpuFence fence = depthFences[index];
         if (fence == null) return true;
-        if (!fence.awaitCompletion(timeoutNanos)) return false;
+        if (!fence.awaitCompletion(timeoutNanos)) {
+            if (timeoutNanos > 0L) {
+                com.rethinkqaq.flashbackexportextras.FlashbackExportExtras.LOGGER.warn(
+                        "Depth readback fence slot {} (frame {}) did not complete within {} ms",
+                        index, depthFrameIds[index], timeoutNanos / 1_000_000L);
+            }
+            return false;
+        }
         //? if >=26.2 {
         try (GpuBufferSlice.MappedView mapped = depthBuffers[index].slice().map(true, false)) {
             ByteBuffer data = mapped.data().duplicate();

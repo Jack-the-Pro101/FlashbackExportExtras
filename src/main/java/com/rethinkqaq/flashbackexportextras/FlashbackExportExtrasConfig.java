@@ -43,6 +43,13 @@ public class FlashbackExportExtrasConfig {
 
     public static FlashbackExportExtrasConfig INSTANCE = new FlashbackExportExtrasConfig();
 
+    /** FFmpeg quality preset names offered in the export UI. */
+    public static final String[] HDR_QUALITY_PRESETS = {
+            "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"
+    };
+
+    public static final String DEFAULT_QUALITY_PRESET = "medium";
+
     /** Mutually exclusive export destination selected by the export UI. */
     public ExportMode exportMode = ExportMode.VIDEO;
 
@@ -73,8 +80,17 @@ public class FlashbackExportExtrasConfig {
     /** Peak brightness in nits for PQ encoding (default 1000). */
     public int hdrPeakBrightness = 1000;
 
-    /** Paper white brightness in nits (SDR reference level, default 203). */
+    /** Paper white brightness in nits (SDR reference level, default 203). Reserved for future use. */
     public int hdrPaperWhiteNits = 203;
+
+    /** FFmpeg quality preset for HDR video export (x264/x265-style names). */
+    public String hdrQualityPreset = DEFAULT_QUALITY_PRESET;
+
+    /** Constant-quality (CRF/CQ) value for HDR encoders that support it (lower = better). */
+    public int hdrCrf = 18;
+
+    /** True = record export audio in stereo, preserving spatial directionality. */
+    public boolean forceStereoAudio = true;
 
     public enum ExportMode {
         VIDEO,
@@ -90,7 +106,9 @@ public class FlashbackExportExtrasConfig {
         /** Scene-linear Rec.709 HDR color (values above 1.0 preserved). */
         SCENE_LINEAR,
         /** S-Log3 transfer with BT.2020 primaries (matches S-Log3 video export). */
-        S_LOG3
+        S_LOG3,
+        /** ACEScct log grading encoding with ACES AP1 primaries (AMPAS S-2016-001). */
+        ACES_CCT
     }
 
     public enum ExrCompression {
@@ -109,6 +127,17 @@ public class FlashbackExportExtrasConfig {
 
     public CameraPathExporter.Format getCameraExportFormat() {
         return cameraExportFormat == null ? CameraPathExporter.Format.GLB : cameraExportFormat;
+    }
+
+    /** Returns a validated HDR quality preset name (see {@link #HDR_QUALITY_PRESETS}). */
+    public String getHdrQualityPreset() {
+        if (hdrQualityPreset != null) {
+            String candidate = hdrQualityPreset.trim().toLowerCase(java.util.Locale.ROOT);
+            for (String preset : HDR_QUALITY_PRESETS) {
+                if (preset.equals(candidate)) return preset;
+            }
+        }
+        return DEFAULT_QUALITY_PRESET;
     }
 
     public ExportMode getExportMode() {

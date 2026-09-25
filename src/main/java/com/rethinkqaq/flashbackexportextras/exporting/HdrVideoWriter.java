@@ -29,6 +29,7 @@ import com.moulberry.flashback.exporting.VideoWriter;
 /*import com.moulberry.flashback.exporting.ImageFrame;
 *//*?}*/
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtras;
+import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig;
 import org.lwjgl.system.MemoryUtil;
 
 import java.io.IOException;
@@ -55,6 +56,8 @@ public class HdrVideoWriter implements VideoWriter {
     public static final int TRANSFER_PQ = 11;
     /** Sony S-Log3 transfer function. */
     public static final int TRANSFER_S_LOG3 = 12;
+    /** Default constant-quality (CRF/CQ) value for encoders that support it. */
+    public static final int DEFAULT_CRF = 18;
 
     /**
      * Resolves the ffmpeg video encoder to use for an HDR export, or null when
@@ -62,9 +65,11 @@ public class HdrVideoWriter implements VideoWriter {
      * (the caller should fall back to Flashback's normal SDR writer).
      *
      * Supported: software H.264/H.265/AV1/VP9 (10-bit yuv420p10le), Apple
-     * ProRes (yuv444p10le, 4444 profile), and NVENC/AMF/VideoToolbox hardware
-     * H.264/HEVC. QSV/VAAPI need device setup and image codecs (GIF/WebP/PNG/
-     * EXR/qtrle) cannot hold HDR — those return null.
+     * ProRes (yuv444p10le, 4444 profile), and NVENC/AMF HEVC or AV1 plus
+     * VideoToolbox HEVC. H.264 hardware encoders (h264_nvenc/h264_amf/
+     * h264_videotoolbox) only support 8-bit and would silently degrade the
+     * export, so they are rejected. QSV/VAAPI need device setup and image
+     * codecs (GIF/WebP/PNG/EXR/qtrle) cannot hold HDR — those return null.
      */
     public static String resolveVideoEncoder(String codecName, String encoderName) {
         String encoder = encoderName == null || encoderName.isBlank()
@@ -72,17 +77,17 @@ public class HdrVideoWriter implements VideoWriter {
         if (encoder == null) return null;
         String lower = encoder.toLowerCase(java.util.Locale.ROOT);
         if (lower.equals("libx265") || lower.equals("libx264")
-                || lower.startsWith("hevc_nvenc") || lower.startsWith("h264_nvenc")
-                || lower.startsWith("hevc_amf") || lower.startsWith("h264_amf")
-                || lower.contains("videotoolbox")
-                || lower.equals("libaom-av1") || lower.equals("libsvtav1") || lower.startsWith("av1_nvenc")
-                || lower.equals("libvpx-vp9")) {
+                || lower.equals("libaom-av1") || lower.equals("libsvtav1") || lower.equals("libvpx-vp9")
+                || lower.startsWith("hevc_nvenc") || lower.startsWith("av1_nvenc")
+                || lower.startsWith("hevc_amf") || lower.startsWith("av1_amf")
+                || lower.startsWith("hevc_videotoolbox")) {
             return encoder;
         }
         if (lower.equals("prores_ks") || lower.equals("prores_aw")) {
             return encoder;
         }
-        // qsv/vaapi (need device setup), qtrle, gif, webp, png, unknown → not supported.
+        // H.264 hardware (8-bit only), qsv/vaapi (need device setup), qtrle,
+        // gif, webp, png, unknown → not supported.
         return null;
     }
 
@@ -98,8 +103,68 @@ public class HdrVideoWriter implements VideoWriter {
         };
     }
 
+    /**
+     * True when the given encoder name selects an H.264 hardware encoder
+     * (h264_nvenc / h264_amf / h264_videotoolbox — 8-bit only, cannot carry
+     * 10-bit HDR). A blank or null encoder resolves to the software default
+     * (libx264) and is allowed.
+     */
+    public static boolean isH264HardwareEncoder(String encoderName) {
+        if (encoderName == null) return false;
+        String lower = encoderName.trim().toLowerCase(java.util.Locale.ROOT);
+        if (lower.isEmpty()) return false;
+        return lower.startsWith("h264_nvenc") || lower.startsWith("h264_amf")
+                || lower.startsWith("h264_videotoolbox");
+    }
+
     private static boolean isProResEncoder(String encoder) {
         return encoder != null && encoder.toLowerCase(java.util.Locale.ROOT).startsWith("prores");
+    }
+
+    private static String normalizeQualityPreset(String preset) {
+        if (preset != null) {
+            String candidate = preset.trim().toLowerCase(java.util.Locale.ROOT);
+            for (String allowed : FlashbackExportExtrasConfig.HDR_QUALITY_PRESETS) {
+                if (allowed.equals(candidate)) return candidate;
+            }
+        }
+        return FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET;
+    }
+
+    /** Maps an x264-style preset name to libsvtav1's numeric preset (13=fastest, 0=best). */
+    private static int svtAv1Preset(String preset) {
+        return switch (preset) {
+            case "ultrafast" -> 12; case "superfast" -> 11; case "veryfast" -> 10;
+            case "faster" -> 9; case "fast" -> 8; case "medium" -> 7;
+            case "slow" -> 5; case "slower" -> 4; default -> 2;
+        };
+    }
+
+    /** Maps an x264-style preset name to NVENC p-levels (p1=fastest, p7=best). */
+    private static int nvencPresetLevel(String preset) {
+        return switch (preset) {
+            case "ultrafast" -> 1; case "superfast" -> 2; case "veryfast" -> 3;
+            case "faster" -> 4; case "fast" -> 4; case "medium" -> 4;
+            case "slow" -> 5; case "slower" -> 6; default -> 7;
+        };
+    }
+
+    /** Maps an x264-style preset name to libaom-av1's cpu-used (0=slowest, 8=fastest). */
+    private static int aomCpuUsed(String preset) {
+        return switch (preset) {
+            case "ultrafast" -> 8; case "superfast" -> 8; case "veryfast" -> 7;
+            case "faster" -> 6; case "fast" -> 6; case "medium" -> 5;
+            case "slow" -> 4; case "slower" -> 3; default -> 2;
+        };
+    }
+
+    /** Maps an x264-style preset name to libvpx-vp9's cpu-used (0=slowest, 8=fastest). */
+    private static int vp9CpuUsed(String preset) {
+        return switch (preset) {
+            case "ultrafast" -> 5; case "superfast" -> 5; case "veryfast" -> 4;
+            case "faster" -> 4; case "fast" -> 3; case "medium" -> 3;
+            case "slow" -> 2; case "slower" -> 1; default -> 1;
+        };
     }
 
     private final Path outputPath;
@@ -113,6 +178,8 @@ public class HdrVideoWriter implements VideoWriter {
     private final int audioChannels;
     private final String audioEncoder;
     private final String videoEncoder;
+    private final int crfQuality;
+    private final String qualityPreset;
     private final int frameSize;
     private final byte[] frameBytes;  // reusable write buffer
     private Process ffmpegProcess;
@@ -125,30 +192,46 @@ public class HdrVideoWriter implements VideoWriter {
     private boolean pipeFailed;
 
     public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate) throws IOException {
-        this(outputPath, width, height, framerate, bitrate, TRANSFER_PQ, 0, "aac", "H265", "libx265");
+        this(outputPath, width, height, framerate, bitrate, TRANSFER_PQ, 0, "aac", "H265", "libx265",
+                DEFAULT_CRF, FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET);
     }
 
     public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate,
                           int transferFunction) throws IOException {
-        this(outputPath, width, height, framerate, bitrate, transferFunction, 0, "aac", "H265", "libx265");
+        this(outputPath, width, height, framerate, bitrate, transferFunction, 0, "aac", "H265", "libx265",
+                DEFAULT_CRF, FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET);
     }
 
     public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate,
                           int transferFunction, int audioChannels, String audioCodec) throws IOException {
         this(outputPath, width, height, framerate, bitrate, transferFunction, audioChannels, audioCodec,
-                "H265", "libx265");
+                "H265", "libx265", DEFAULT_CRF, FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET);
     }
 
     public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate,
                           int transferFunction, int audioChannels, String audioCodec,
                           String videoEncoder) throws IOException {
         this(outputPath, width, height, framerate, bitrate, transferFunction, audioChannels, audioCodec,
-                null, videoEncoder);
+                null, videoEncoder, DEFAULT_CRF, FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET);
     }
 
     public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate,
                           int transferFunction, int audioChannels, String audioCodec,
                           String videoCodecName, String videoEncoder) throws IOException {
+        this(outputPath, width, height, framerate, bitrate, transferFunction, audioChannels, audioCodec,
+                videoCodecName, videoEncoder, DEFAULT_CRF, FlashbackExportExtrasConfig.DEFAULT_QUALITY_PRESET);
+    }
+
+    /**
+     * @param crfQuality    constant-quality (CRF/CQ) value, 0-51; used only by
+     *                      encoders with a CRF equivalent
+     * @param qualityPreset x264/x265-style preset name; mapped to the closest
+     *                      equivalent for other encoders
+     */
+    public HdrVideoWriter(Path outputPath, int width, int height, double framerate, int bitrate,
+                          int transferFunction, int audioChannels, String audioCodec,
+                          String videoCodecName, String videoEncoder,
+                          int crfQuality, String qualityPreset) throws IOException {
         this.outputPath = outputPath;
         this.videoTempPath = tempSibling(outputPath, ".video.tmp");
         this.audioTempPath = tempSibling(outputPath, ".audio.f32");
@@ -159,15 +242,20 @@ public class HdrVideoWriter implements VideoWriter {
         this.transferFunction = transferFunction == TRANSFER_S_LOG3 ? TRANSFER_S_LOG3 : TRANSFER_PQ;
         this.audioChannels = Math.max(0, audioChannels);
         this.audioEncoder = mapAudioCodec(audioCodec);
-        this.videoEncoder = resolveVideoEncoder(videoCodecName, videoEncoder);
+        // The caller (MixinExportJob) validates the encoder through
+        // resolveVideoEncoder; only fill in a default when none was given.
+        this.videoEncoder = videoEncoder == null || videoEncoder.isBlank()
+                ? defaultEncoderFor(videoCodecName) : videoEncoder;
         if (this.videoEncoder == null) {
             throw new IllegalArgumentException("Unsupported HDR video encoder: " + videoEncoder);
         }
+        this.crfQuality = Math.max(0, Math.min(51, crfQuality));
+        this.qualityPreset = normalizeQualityPreset(qualityPreset);
         this.frameSize = width * height * 8;
         this.frameBytes = new byte[frameSize];
         Files.createDirectories(outputPath.getParent());
-        FlashbackExportExtras.LOGGER.info("HDR encoder requested bitrate: {} bps ({} Mbps)",
-                bitrate, bitrate / 1_000_000.0);
+        FlashbackExportExtras.LOGGER.info("HDR rate control: encoder={}, preset={}, crf={}, bitrate={} bps",
+                this.videoEncoder, this.qualityPreset, this.crfQuality, bitrate);
         FlashbackExportExtras.LOGGER.info("{} video export: {}x{} @ {}fps, {} encoder, audio={}ch/{} → {}",
                 this.transferFunction == TRANSFER_S_LOG3 ? "S-Log3" : "HDR10",
                 width, height, framerate, this.videoEncoder, this.audioChannels, this.audioEncoder, outputPath);
@@ -229,7 +317,9 @@ public class HdrVideoWriter implements VideoWriter {
         args.add("-video_size");
         args.add(width + "x" + height);
         args.add("-framerate");
-        args.add(String.valueOf((int) framerate));
+        // Keep fractional rates (e.g. 29.97) intact — truncating to int would
+        // desync audio against video over a long export.
+        args.add(String.valueOf(framerate));
         args.add("-i");
         args.add("pipe:0");
         args.add("-c:v");
@@ -248,20 +338,67 @@ public class HdrVideoWriter implements VideoWriter {
             args.add("-b:v");
             args.add(String.valueOf(bitrate));
         } else {
-            if (lowerEncoder.equals("libx265") || lowerEncoder.equals("libx264")) {
-                args.add("-preset");
-                args.add("medium");
-            }
-            args.add("-b:v");
-            args.add(String.valueOf(bitrate));
-            args.add("-minrate");
-            args.add(String.valueOf(bitrate));
-            args.add("-maxrate");
-            args.add(String.valueOf(bitrate));
-            args.add("-bufsize");
-            args.add(String.valueOf(bitrate));
             args.add("-pix_fmt");
             args.add("yuv420p10le");
+            // Constant-quality VBR for encoders with a CRF/CQ equivalent;
+            // average-bitrate VBR for the rest (AMF, VideoToolbox).
+            switch (lowerEncoder) {
+                case "libx264", "libx265" -> {
+                    args.add("-preset");
+                    args.add(qualityPreset);
+                    args.add("-crf");
+                    args.add(String.valueOf(crfQuality));
+                }
+                case "libsvtav1" -> {
+                    args.add("-preset");
+                    args.add(String.valueOf(svtAv1Preset(qualityPreset)));
+                    args.add("-crf");
+                    args.add(String.valueOf(crfQuality));
+                }
+                case "libaom-av1" -> {
+                    args.add("-crf");
+                    args.add(String.valueOf(crfQuality));
+                    args.add("-b:v");
+                    args.add("0");
+                    args.add("-cpu-used");
+                    args.add(String.valueOf(aomCpuUsed(qualityPreset)));
+                }
+                case "libvpx-vp9" -> {
+                    args.add("-crf");
+                    args.add(String.valueOf(crfQuality));
+                    args.add("-b:v");
+                    args.add("0");
+                    args.add("-deadline");
+                    args.add("good");
+                    args.add("-cpu-used");
+                    args.add(String.valueOf(vp9CpuUsed(qualityPreset)));
+                }
+                default -> {
+                    if (lowerEncoder.startsWith("hevc_nvenc") || lowerEncoder.startsWith("av1_nvenc")) {
+                        // Quality-targeted VBR via the constant-quality knob.
+                        args.add("-preset");
+                        args.add("p" + nvencPresetLevel(qualityPreset));
+                        args.add("-tune");
+                        args.add("hq");
+                        args.add("-rc");
+                        args.add("vbr");
+                        args.add("-cq");
+                        args.add(String.valueOf(crfQuality));
+                        args.add("-b:v");
+                        args.add("0");
+                    } else if (lowerEncoder.startsWith("hevc_amf") || lowerEncoder.startsWith("av1_amf")) {
+                        // AMF has no CRF/CQ path for 10-bit HDR; bitrate VBR.
+                        args.add("-rc");
+                        args.add("vbr");
+                        args.add("-b:v");
+                        args.add(String.valueOf(bitrate));
+                    } else {
+                        // VideoToolbox HEVC: average-bitrate (VBR) rate control.
+                        args.add("-b:v");
+                        args.add(String.valueOf(bitrate));
+                    }
+                }
+            }
         }
         args.add("-color_primaries");
         args.add("bt2020");
@@ -280,10 +417,7 @@ public class HdrVideoWriter implements VideoWriter {
         if (lowerEncoder.equals("libx265")) {
             args.add("-x265-params");
             args.add("repeat-headers=1:colorprim=bt2020:colormatrix=bt2020nc"
-                    + (slog3 ? "" : ":hdr-opt=1:transfer=smpte2084")
-                    + ":nal-hrd=cbr:vbv-maxrate=" + Math.max(1, bitrate / 1000)
-                    + ":vbv-bufsize=" + Math.max(1, bitrate / 1000)
-                    + ":filler=1");
+                    + (slog3 ? "" : ":hdr-opt=1:transfer=smpte2084"));
         } else if (lowerEncoder.equals("libx264")) {
             args.add("-x264-params");
             args.add("colorprim=bt2020:colormatrix=bt2020nc"
@@ -397,7 +531,11 @@ public class HdrVideoWriter implements VideoWriter {
         if (finished) return;
         finished = true;
         if (pipeFailed) {
+            if (ffmpegStdin != null) {
+                try { ffmpegStdin.close(); } catch (IOException ignored) {}
+            }
             if (ffmpegProcess != null) ffmpegProcess.destroy();
+            cleanupTempFiles();
             FlashbackExportExtras.LOGGER.warn("HDR export aborted after FFmpeg pipe failure at frame {}", frameCount);
             return;
         }
@@ -474,11 +612,13 @@ public class HdrVideoWriter implements VideoWriter {
             int exitCode = process.waitFor();
             if (exitCode != 0) {
                 FlashbackExportExtras.LOGGER.error("HDR export: audio mux pass failed with code {}", exitCode);
+                moveVideoTempToOutput();
                 return false;
             }
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             FlashbackExportExtras.LOGGER.error("HDR export: audio mux pass failed", e);
+            moveVideoTempToOutput();
             return false;
         } finally {
             cleanupTempFiles();

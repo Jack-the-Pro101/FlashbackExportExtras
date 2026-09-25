@@ -29,6 +29,7 @@ import com.moulberry.flashback.exporting.VideoWriter;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtras;
 import com.rethinkqaq.flashbackexportextras.FlashbackExportExtrasConfig.ExrCompression;
+import org.lwjgl.system.MemoryUtil;
 
 import java.io.IOException;
 import java.nio.FloatBuffer;
@@ -50,7 +51,7 @@ public class ExrVideoWriter implements VideoWriter {
 
     private static final int QUEUE_CAPACITY = 8;
     private static final int WRITER_COUNT = 2;
-    private static final FramePacket STOP = new FramePacket(-1, null, null, null);
+    private static final FramePacket STOP = new FramePacket(-1, null, null, null, false);
 
     private final MultiLayerExrWriter[] exrWriters;
     private final ArrayBlockingQueue<FramePacket> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
@@ -59,20 +60,23 @@ public class ExrVideoWriter implements VideoWriter {
     private final Thread[] writerThreads = new Thread[WRITER_COUNT];
     private final Deque<NativeImage> pendingColors = new ArrayDeque<>();
     private final boolean sceneLinearHdr;
+    private final boolean sLog3Encoding;
     private volatile boolean accepting = true;
     private boolean finished;
     private long nextFrameId;
     private long encodedFrameCount;
 
     public ExrVideoWriter(Path outputDir, int width, int height, boolean sceneLinearHdr,
-                          boolean sLog3Encoding, ExrCompression compression) throws IOException {
+                          boolean sLog3Encoding, boolean acesCctEncoding,
+                          ExrCompression compression) throws IOException {
         this.sceneLinearHdr = sceneLinearHdr;
+        this.sLog3Encoding = sLog3Encoding;
         this.exrWriters = new MultiLayerExrWriter[WRITER_COUNT];
         try {
             for (int i = 0; i < WRITER_COUNT; i++) {
                 exrWriters[i] = new MultiLayerExrWriter(outputDir, width, height,
                         FlashbackExportExtrasConfig.INSTANCE.depthLinearizeWorldSpace, sceneLinearHdr,
-                        sLog3Encoding, compression);
+                        sLog3Encoding, acesCctEncoding, compression);
             }
         } catch (IOException | RuntimeException e) {
             for (MultiLayerExrWriter writer : exrWriters) {
@@ -88,8 +92,8 @@ public class ExrVideoWriter implements VideoWriter {
             writerThread.start();
             writerThreads[i] = writerThread;
         }
-        FlashbackExportExtras.LOGGER.info("EXR writers started: output={}, workers={}, queueCapacity={}, sceneLinearHdr={}, slog3={}, compression={}",
-                outputDir, WRITER_COUNT, QUEUE_CAPACITY, sceneLinearHdr, sLog3Encoding, compression);
+        FlashbackExportExtras.LOGGER.info("EXR writers started: output={}, workers={}, queueCapacity={}, sceneLinearHdr={}, slog3={}, acesCct={}, compression={}",
+                outputDir, WRITER_COUNT, QUEUE_CAPACITY, sceneLinearHdr, sLog3Encoding, acesCctEncoding, compression);
     }
 
     /*? if >=26.1 {*/
@@ -129,20 +133,33 @@ public class ExrVideoWriter implements VideoWriter {
     private void drainPairs() {
         while (!pendingColors.isEmpty()) {
             DepthCaptureState.DepthFrame depthFrame;
-            SceneLinearHdrCaptureState.ColorFrame hdrFrame = null;
+            // Scene-linear half-float or GPU-encoded S-Log3 RGBA16 color data.
+            ByteBuffer hdrData = null;
+            boolean hdrFromVideoQueue = false;
             depthFrame = DepthCaptureState.peek(nextFrameId);
             if (depthFrame == null) break;
 
             if (sceneLinearHdr) {
-                hdrFrame = SceneLinearHdrCaptureState.poll(nextFrameId);
+                SceneLinearHdrCaptureState.ColorFrame hdrFrame = SceneLinearHdrCaptureState.poll(nextFrameId);
                 if (hdrFrame == null) break;
+                hdrData = hdrFrame.data;
             }
+            //? if hdr {
+            else if (sLog3Encoding) {
+                // S-Log3 frames come from the HDR video capture queue; the
+                // GPU already applied decode + BT.2020 + S-Log3.
+                HdrVideoCaptureState.Frame slog3Frame = HdrVideoCaptureState.poll(nextFrameId);
+                if (slog3Frame == null) break;
+                hdrData = slog3Frame.data;
+                hdrFromVideoQueue = true;
+            }
+            //?}
 
             depthFrame = DepthCaptureState.poll(nextFrameId);
 
             NativeImage colorImage = pendingColors.removeFirst();
             FramePacket packet = new FramePacket((int) nextFrameId++, colorImage, depthFrame,
-                    hdrFrame == null ? null : hdrFrame.data);
+                    hdrData, hdrFromVideoQueue);
             try {
                 if (!queue.offer(packet, 30, TimeUnit.SECONDS)) {
                     packet.close();
@@ -170,8 +187,8 @@ public class ExrVideoWriter implements VideoWriter {
                 FramePacket packet = queue.take();
                 if (packet == STOP) return;
                 try {
-                    if (packet.sceneLinearHdr != null) {
-                        exrWriters[workerIndex].writeHdrFrame(packet.sceneLinearHdr, packet.depth,
+                    if (packet.hdrColor != null) {
+                        exrWriters[workerIndex].writeHdrFrame(packet.hdrColor, packet.depth,
                                 packet.frameId);
                     } else {
                         exrWriters[workerIndex].writeFrame(packet.color, packet.depth, packet.frameId);
@@ -202,11 +219,17 @@ public class ExrVideoWriter implements VideoWriter {
         FlashbackExportExtras.LOGGER.info("EXR finish: draining pending pairs");
         try {
             if (sceneLinearHdr) SceneLinearHdrCaptureState.throwIfFailed();
+            /*? if hdr {*/
+            if (sLog3Encoding) HdrVideoCaptureState.throwIfFailed();
+            /*?}*/
             drainPairs();
             if (!pendingColors.isEmpty()) {
                 writerFailure.compareAndSet(null, new IllegalStateException(
-                        "Missing matching " + (sceneLinearHdr ? "HDR color or " : "")
-                                + "depth data for EXR frame " + nextFrameId));
+                        "Missing matching " + (sceneLinearHdr || sLog3Encoding ? "HDR color or " : "")
+                                + "depth data for EXR frame " + nextFrameId
+                                + " (pendingColors=" + pendingColors.size()
+                                + ", depthQueued=" + DepthCaptureState.queuedFrameCount()
+                                + ", sceneLinearQueued=" + SceneLinearHdrCaptureState.size() + ")"));
             }
             int remainingDepth = DepthCaptureState.queuedFrameCount();
             int remainingHdr = SceneLinearHdrCaptureState.size();
@@ -218,6 +241,11 @@ public class ExrVideoWriter implements VideoWriter {
             if (sceneLinearHdr) {
                 SceneLinearHdrCaptureState.verifyComplete(nextFrameId, nextFrameId);
             }
+            /*? if hdr {*/
+            if (sLog3Encoding) {
+                HdrVideoCaptureState.verifyComplete(nextFrameId, nextFrameId);
+            }
+            /*?}*/
             discardPendingColors();
             FlashbackExportExtras.LOGGER.info("EXR finish: queue={}, sending {} stop signals",
                     queue.size(), WRITER_COUNT);
@@ -286,20 +314,30 @@ public class ExrVideoWriter implements VideoWriter {
         private final int frameId;
         private final NativeImage color;
         private final DepthCaptureState.DepthFrame depth;
-        private final ByteBuffer sceneLinearHdr;
+        /** Scene-linear RGBA16F or GPU-encoded S-Log3 RGBA16 color data. */
+        private final ByteBuffer hdrColor;
+        /** True when hdrColor came from HdrVideoCaptureState (freed via MemoryUtil). */
+        private final boolean hdrFromVideoQueue;
 
         private FramePacket(int frameId, NativeImage color, DepthCaptureState.DepthFrame depth,
-                            ByteBuffer sceneLinearHdr) {
+                            ByteBuffer hdrColor, boolean hdrFromVideoQueue) {
             this.frameId = frameId;
             this.color = color;
             this.depth = depth;
-            this.sceneLinearHdr = sceneLinearHdr;
+            this.hdrColor = hdrColor;
+            this.hdrFromVideoQueue = hdrFromVideoQueue;
         }
 
         private void close() {
             if (color != null) color.close();
             if (depth != null) DepthCaptureState.releaseBuffer(depth.data);
-            if (sceneLinearHdr != null) SceneLinearHdrCaptureState.release(sceneLinearHdr);
+            if (hdrColor != null) {
+                if (hdrFromVideoQueue) {
+                    MemoryUtil.memFree(hdrColor);
+                } else {
+                    SceneLinearHdrCaptureState.release(hdrColor);
+                }
+            }
         }
     }
 }
