@@ -104,7 +104,6 @@ public class MixinStartExportWindow {
     private static void addFormatSelector(EditorState editorState, FlashbackConfigV1 config,
                                            CallbackInfo ci) {
         // Format radio buttons
-        ImGui.separator();
         ImGui.text(I18n.get("flashbackexportextras.export_format") + ":");
         ImGui.sameLine();
 
